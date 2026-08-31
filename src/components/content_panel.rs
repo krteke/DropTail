@@ -334,9 +334,10 @@ fn build_archive_settings(settings: &ArchiveSettings) -> gtk::Box {
     ]);
     format_row.set_model(Some(&formats));
     format_row.set_selected(match settings.format {
-        ArchiveFormat::Auto | ArchiveFormat::TarZst => 0,
-        ArchiveFormat::TarGz => 1,
-        ArchiveFormat::Zip => 2,
+        ArchiveFormat::Tar => 0,
+        ArchiveFormat::TarZst => 1,
+        ArchiveFormat::TarGz => 2,
+        ArchiveFormat::Zip => 3,
     });
     group.add(&format_row);
 

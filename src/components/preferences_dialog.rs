@@ -7,6 +7,7 @@ use crate::models::{ArchiveFormat, CompressionLevel, PreferenceChange, Preferenc
 pub enum PreferencesDialogMsg {
     NotifyAfterTransfer(bool),
     InhibitSuspend(bool),
+    ShowOfflineDevices(bool),
     DefaultFormat(u32),
     CompressionLevel(u32),
 }
@@ -30,6 +31,19 @@ impl SimpleComponent for PreferencesDialog {
             set_search_enabled: false,
 
             add = &adw::PreferencesPage {
+                adw::PreferencesGroup {
+                    set_title: "设备",
+
+                    adw::SwitchRow {
+                        set_title: "显示离线设备",
+                        set_subtitle: "关闭后，设备列表中只保留当前在线的设备。",
+                        set_active: model.data.show_offline_devices,
+                        connect_active_notify[sender] => move |row| {
+                            sender.input(PreferencesDialogMsg::ShowOfflineDevices(row.is_active()));
+                        },
+                    },
+                },
+
                 adw::PreferencesGroup {
                     set_title: "传输",
 
@@ -90,7 +104,7 @@ impl SimpleComponent for PreferencesDialog {
         widgets
             .format_row
             .set_selected(match model.data.default_format {
-                ArchiveFormat::Auto => 0,
+                ArchiveFormat::Tar => 0,
                 ArchiveFormat::TarZst => 1,
                 ArchiveFormat::TarGz => 2,
                 ArchiveFormat::Zip => 3,
@@ -115,22 +129,27 @@ impl SimpleComponent for PreferencesDialog {
                 PreferenceChange::NotifyAfterTransfer(value)
             }
             PreferencesDialogMsg::InhibitSuspend(value) => PreferenceChange::InhibitSuspend(value),
+            PreferencesDialogMsg::ShowOfflineDevices(value) => {
+                PreferenceChange::ShowOfflineDevices(value)
+            }
             PreferencesDialogMsg::DefaultFormat(value) => {
-                PreferenceChange::DefaultFormat(match value {
-                    0 => ArchiveFormat::Auto,
+                let format = match value {
+                    0 => ArchiveFormat::Tar,
                     1 => ArchiveFormat::TarZst,
                     2 => ArchiveFormat::TarGz,
                     3 => ArchiveFormat::Zip,
                     _ => unreachable!("format row only exposes four options"),
-                })
+                };
+                PreferenceChange::DefaultFormat(format)
             }
             PreferencesDialogMsg::CompressionLevel(value) => {
-                PreferenceChange::CompressionLevel(match value {
+                let level = match value {
                     0 => CompressionLevel::Fast,
                     1 => CompressionLevel::Balanced,
                     2 => CompressionLevel::Smaller,
                     _ => unreachable!("compression row only exposes three options"),
-                })
+                };
+                PreferenceChange::CompressionLevel(level)
             }
         };
         sender.output(change).ok();

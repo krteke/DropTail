@@ -8,7 +8,7 @@ use relm4::{
 
 use crate::application::{AppService, ContentRequest};
 use crate::components::content_panel::{ContentPanel, ContentPanelMsg, ContentPanelOutput};
-use crate::components::device_panel::{DevicePanel, DevicePanelOutput};
+use crate::components::device_panel::{DevicePanel, DevicePanelMsg, DevicePanelOutput};
 use crate::components::preferences_dialog::PreferencesDialog;
 use crate::components::progress_panel::{ProgressPanel, ProgressPanelMsg};
 use crate::models::{ContentPreview, Device, PreferenceChange, SendMethod, TransferSnapshot};
@@ -237,7 +237,7 @@ impl SimpleComponent for App {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let service = AppService;
+        let service = AppService::new();
         let bootstrap = service.bootstrap();
         let target = bootstrap.selected_device;
         let content = bootstrap.content;
@@ -379,7 +379,16 @@ impl SimpleComponent for App {
                 let content = self.service.remove_content_item(&item_id);
                 self.show_content(content);
             }
-            AppMsg::PreferenceChanged(change) => self.service.update_preference(change),
+            AppMsg::PreferenceChanged(change) => {
+                let refresh_devices = matches!(change, PreferenceChange::ShowOfflineDevices(_));
+                self.service
+                    .update_preference(change)
+                    .expect("GSettings preference must be writable");
+                if refresh_devices {
+                    let devices = self.service.fetch_devices(&self.target.id);
+                    self.device_panel.emit(DevicePanelMsg::Show(devices));
+                }
+            }
             AppMsg::PrimaryAction
                 if self.page == Page::Compose && self.content.summary.is_ready() =>
             {
@@ -418,8 +427,8 @@ impl SimpleComponent for App {
                     .application_icon("send-to-symbolic")
                     .developer_name("DropTail")
                     .version(env!("CARGO_PKG_VERSION"))
-                    .comments("一个专注于 Taildrop 发送流程的桌面界面原型。")
-                    .license_type(gtk::License::MitX11)
+                    .comments("")
+                    .license_type(gtk::License::Gpl30)
                     .build()
                     .present(Some(&self.window));
             }

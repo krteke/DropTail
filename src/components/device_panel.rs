@@ -1,10 +1,11 @@
 use relm4::adw::prelude::*;
-use relm4::{ComponentParts, ComponentSender, SimpleComponent, adw, gtk};
+use relm4::{Component, ComponentParts, ComponentSender, adw, gtk};
 
 use crate::models::{Device, DeviceKind, DeviceList};
 
 #[derive(Debug)]
 pub enum DevicePanelMsg {
+    Show(DeviceList),
     Select(usize),
 }
 
@@ -15,14 +16,31 @@ pub enum DevicePanelOutput {
 
 pub struct DevicePanel {
     devices: Vec<Device>,
-    selected: usize,
+}
+
+impl DevicePanel {
+    fn replace_devices(&mut self, list: &gtk::ListBox, data: DeviceList) {
+        let selected = data
+            .devices
+            .iter()
+            .position(|device| device.id == data.selected_id)
+            .expect("device panel must receive a valid selected device id");
+
+        self.devices = data.devices;
+        list.remove_all();
+        for device in &self.devices {
+            list.append(&build_device_row(device));
+        }
+        list.select_row(list.row_at_index(selected as i32).as_ref());
+    }
 }
 
 #[relm4::component(pub)]
-impl SimpleComponent for DevicePanel {
+impl Component for DevicePanel {
     type Init = DeviceList;
     type Input = DevicePanelMsg;
     type Output = DevicePanelOutput;
+    type CommandOutput = ();
 
     view! {
         #[root]
@@ -64,36 +82,29 @@ impl SimpleComponent for DevicePanel {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let selected = init
-            .devices
-            .iter()
-            .position(|device| device.id == init.selected_id)
-            .expect("device panel must receive a valid selected device id");
-        let model = Self {
-            devices: init.devices,
-            selected,
+        let mut model = Self {
+            devices: Vec::new(),
         };
         let widgets = view_output!();
-
-        for device in &model.devices {
-            widgets.device_list.append(&build_device_row(device));
-        }
-        widgets.device_list.select_row(
-            widgets
-                .device_list
-                .row_at_index(model.selected as i32)
-                .as_ref(),
-        );
+        model.replace_devices(&widgets.device_list, init);
 
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
+    fn update_with_view(
+        &mut self,
+        widgets: &mut Self::Widgets,
+        msg: Self::Input,
+        sender: ComponentSender<Self>,
+        _root: &Self::Root,
+    ) {
         match msg {
+            DevicePanelMsg::Show(devices) => {
+                self.replace_devices(&widgets.device_list, devices);
+            }
             DevicePanelMsg::Select(index) => {
                 let device = &self.devices[index];
                 if device.is_online() {
-                    self.selected = index;
                     sender
                         .output(DevicePanelOutput::Selected(device.clone()))
                         .ok();

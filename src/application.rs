@@ -1,8 +1,11 @@
-use crate::mock_api::{content, devices, preferences, transfer};
+use relm4::gtk::glib;
+
+use crate::mock_api::{content, devices, transfer};
 use crate::models::{
     ContentPreview, Device, DeviceList, PreferenceChange, PreferencesData, SendMethod,
     TransferSnapshot,
 };
+use crate::settings::SettingsStore;
 
 pub struct AppBootstrap {
     pub devices: DeviceList,
@@ -18,11 +21,23 @@ pub enum ContentRequest {
     Method(SendMethod),
 }
 
-pub struct AppService;
+pub struct AppService {
+    settings: SettingsStore,
+}
 
 impl AppService {
+    pub fn new() -> Self {
+        Self {
+            settings: SettingsStore::new(),
+        }
+    }
+
     pub fn bootstrap(&self) -> AppBootstrap {
-        let devices = devices::fetch_devices();
+        let preferences = self.settings.read();
+        let devices = Self::with_device_visibility(
+            devices::fetch_devices(),
+            preferences.show_offline_devices,
+        );
         let selected_device = devices
             .devices
             .iter()
@@ -35,8 +50,14 @@ impl AppService {
             devices,
             selected_device,
             content,
-            preferences: preferences::fetch_preferences(),
+            preferences,
         }
+    }
+
+    pub fn fetch_devices(&self, selected_id: &str) -> DeviceList {
+        let mut devices = devices::fetch_devices();
+        devices.selected_id = selected_id.to_owned();
+        Self::with_device_visibility(devices, self.settings.read().show_offline_devices)
     }
 
     pub fn fetch_content(&self, request: ContentRequest) -> ContentPreview {
@@ -49,8 +70,8 @@ impl AppService {
         }
     }
 
-    pub fn update_preference(&self, change: PreferenceChange) {
-        preferences::update_preference(change);
+    pub fn update_preference(&self, change: PreferenceChange) -> Result<(), glib::BoolError> {
+        self.settings.write(change)
     }
 
     pub fn remove_content_item(&self, item_id: &str) -> ContentPreview {
@@ -63,5 +84,19 @@ impl AppService {
 
     pub fn cancel_transfer(&self, transfer_id: &str) {
         transfer::cancel_transfer(transfer_id);
+    }
+
+    fn with_device_visibility(mut devices: DeviceList, show_offline: bool) -> DeviceList {
+        if !show_offline {
+            devices.devices.retain(Device::is_online);
+        }
+        assert!(
+            devices
+                .devices
+                .iter()
+                .any(|device| device.id == devices.selected_id),
+            "selected device must remain visible"
+        );
+        devices
     }
 }

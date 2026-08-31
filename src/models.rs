@@ -53,7 +53,7 @@ pub enum SendMethod {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveFormat {
-    Auto,
+    Tar,
     TarZst,
     TarGz,
     Zip,
@@ -109,6 +109,7 @@ pub struct ContentPreview {
 pub struct PreferencesData {
     pub notify_after_transfer: bool,
     pub inhibit_suspend: bool,
+    pub show_offline_devices: bool,
     pub default_format: ArchiveFormat,
     pub compression_level: CompressionLevel,
 }
@@ -117,6 +118,7 @@ pub struct PreferencesData {
 pub enum PreferenceChange {
     NotifyAfterTransfer(bool),
     InhibitSuspend(bool),
+    ShowOfflineDevices(bool),
     DefaultFormat(ArchiveFormat),
     CompressionLevel(CompressionLevel),
 }

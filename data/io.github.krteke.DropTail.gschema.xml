@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<schemalist>
+  <enum id="io.github.krteke.DropTail.ArchiveFormat">
+    <value nick="tar" value="0" />
+    <value nick="tar-zst" value="1" />
+    <value nick="tar-gz" value="2" />
+    <value nick="zip" value="3" />
+  </enum>
+
+  <enum id="io.github.krteke.DropTail.CompressionLevel">
+    <value nick="fast" value="0" />
+    <value nick="balanced" value="1" />
+    <value nick="smaller" value="2" />
+  </enum>
+
+  <schema id="io.github.krteke.DropTail" path="/io/github/droptail/Send/">
+    <key name="notify-after-transfer" type="b">
+      <default>true</default>
+    </key>
+    <key name="inhibit-suspend" type="b">
+      <default>true</default>
+    </key>
+    <key name="show-offline-devices" type="b">
+      <default>true</default>
+    </key>
+    <key name="default-format" enum="io.github.krteke.DropTail.ArchiveFormat">
+      <default>'tar'</default>
+    </key>
+    <key
+            name="compression-level"
+            enum="io.github.krteke.DropTail.CompressionLevel"
+        >
+      <default>'balanced'</default>
+    </key>
+  </schema>
+</schemalist>
