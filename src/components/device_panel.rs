@@ -1,7 +1,7 @@
 use relm4::adw::prelude::*;
 use relm4::{Component, ComponentParts, ComponentSender, adw, gtk};
 
-use crate::models::{Device, DeviceKind, DeviceList};
+use crate::domain::device::{Device, DeviceKind, DeviceList};
 
 #[derive(Debug)]
 pub enum DevicePanelMsg {
@@ -11,7 +11,7 @@ pub enum DevicePanelMsg {
 
 #[derive(Debug)]
 pub enum DevicePanelOutput {
-    Selected(Device),
+    Selected(String),
 }
 
 pub struct DevicePanel {
@@ -20,13 +20,9 @@ pub struct DevicePanel {
 
 impl DevicePanel {
     fn replace_devices(&mut self, list: &gtk::ListBox, data: DeviceList) {
-        let selected = data
-            .devices
-            .iter()
-            .position(|device| device.id == data.selected_id)
-            .expect("device panel must receive a valid selected device id");
+        let selected = data.selected_index();
 
-        self.devices = data.devices;
+        self.devices = data.devices().to_vec();
         list.remove_all();
         for device in &self.devices {
             list.append(&build_device_row(device));
@@ -106,7 +102,7 @@ impl Component for DevicePanel {
                 let device = &self.devices[index];
                 if device.is_online() {
                     sender
-                        .output(DevicePanelOutput::Selected(device.clone()))
+                        .output(DevicePanelOutput::Selected(device.id.clone()))
                         .ok();
                 }
             }

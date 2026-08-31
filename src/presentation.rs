@@ -1,3 +1,5 @@
+use crate::domain::content::SendMethod;
+
 pub fn format_size(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = 1024.0 * KIB;
@@ -29,4 +31,3 @@ pub fn send_method_label(method: SendMethod) -> &'static str {
         SendMethod::Archive => "打包后发送",
     }
 }
-use crate::models::SendMethod;

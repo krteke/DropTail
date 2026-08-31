@@ -1,7 +1,8 @@
 use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, SimpleComponent, adw, gtk};
 
-use crate::models::{ConnectionKind, DeviceKind, TransferItemState, TransferSnapshot};
+use crate::domain::device::{ConnectionKind, DeviceKind};
+use crate::domain::transfer::{TransferItemState, TransferSnapshot};
 use crate::presentation::{format_rate, format_size};
 
 #[derive(Debug)]

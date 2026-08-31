@@ -1,102 +1,99 @@
-use relm4::gtk::glib;
+use std::path::Path;
 
-use crate::mock_api::{content, devices, transfer};
-use crate::models::{
-    ContentPreview, Device, DeviceList, PreferenceChange, PreferencesData, SendMethod,
-    TransferSnapshot,
+use crate::domain::content::{
+    ArchiveDefaults, ArchiveFormat, ContentItem, ContentSelection, SendMethod,
 };
-use crate::settings::SettingsStore;
+use crate::domain::device::{Device, DeviceList};
+use crate::domain::preferences::{PreferenceChange, Preferences};
+use crate::domain::transfer::TransferSnapshot;
+use crate::mock_api::{devices as devices_api, transfer as transfer_api};
+use crate::settings::{SettingsError, SettingsStore};
 
-pub struct AppBootstrap {
-    pub devices: DeviceList,
-    pub selected_device: Device,
-    pub content: ContentPreview,
-    pub preferences: PreferencesData,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum ContentRequest {
-    Files,
-    Folder,
-    Method(SendMethod),
-}
-
-pub struct AppService {
+pub struct Application {
     settings: SettingsStore,
+    devices: DeviceList,
+    content: ContentSelection,
+    transfer: Option<Box<TransferSnapshot>>,
 }
 
-impl AppService {
+impl Application {
     pub fn new() -> Self {
         Self {
             settings: SettingsStore::new(),
+            devices: devices_api::fetch_devices(),
+            content: ContentSelection::default(),
+            transfer: None,
         }
     }
 
-    pub fn bootstrap(&self) -> AppBootstrap {
-        let preferences = self.settings.read();
-        let devices = Self::with_device_visibility(
-            devices::fetch_devices(),
-            preferences.show_offline_devices,
-        );
-        let selected_device = devices
-            .devices
-            .iter()
-            .find(|device| device.id == devices.selected_id)
-            .expect("mock device response must identify an existing device")
-            .clone();
-        let content = content::fetch_empty_preview();
-
-        AppBootstrap {
-            devices,
-            selected_device,
-            content,
-            preferences,
-        }
+    pub fn preferences(&self) -> Preferences {
+        self.settings.read()
     }
 
-    pub fn fetch_devices(&self, selected_id: &str) -> DeviceList {
-        let mut devices = devices::fetch_devices();
-        devices.selected_id = selected_id.to_owned();
-        Self::with_device_visibility(devices, self.settings.read().show_offline_devices)
+    pub fn visible_devices(&self, show_offline: bool) -> DeviceList {
+        self.devices.with_offline_visible(show_offline)
     }
 
-    pub fn fetch_content(&self, request: ContentRequest) -> ContentPreview {
-        match request {
-            ContentRequest::Files | ContentRequest::Method(SendMethod::Separate) => {
-                content::fetch_files_preview()
-            }
-            ContentRequest::Folder => content::fetch_folder_preview(),
-            ContentRequest::Method(SendMethod::Archive) => content::fetch_packed_files_preview(),
-        }
+    pub fn selected_device(&self) -> &Device {
+        self.devices.selected()
     }
 
-    pub fn update_preference(&self, change: PreferenceChange) -> Result<(), glib::BoolError> {
+    pub fn select_device(&mut self, selected_id: &str) {
+        self.devices.select(selected_id);
+    }
+
+    pub fn content(&self) -> &ContentSelection {
+        &self.content
+    }
+
+    pub fn add_content(&mut self, items: Vec<ContentItem>) {
+        let defaults = self.archive_defaults();
+        self.content.add(items, defaults);
+    }
+
+    pub fn set_send_method(&mut self, method: SendMethod) {
+        let defaults = self.archive_defaults();
+        self.content.set_send_method(method, defaults);
+    }
+
+    pub fn set_archive_format(&mut self, format: ArchiveFormat) {
+        self.content.set_archive_format(format);
+    }
+
+    pub fn remove_content(&mut self, path: &Path) {
+        let defaults = self.archive_defaults();
+        self.content.remove(path, defaults);
+    }
+
+    pub fn update_preference(&self, change: PreferenceChange) -> Result<(), SettingsError> {
         self.settings.write(change)
     }
 
-    pub fn remove_content_item(&self, item_id: &str) -> ContentPreview {
-        content::remove_item(item_id)
+    pub fn transfer(&self) -> Option<&TransferSnapshot> {
+        self.transfer.as_deref()
     }
 
-    pub fn start_transfer(&self, target: &Device, content: &ContentPreview) -> TransferSnapshot {
-        transfer::start_transfer(target, content)
+    pub fn start_transfer(&mut self) -> &TransferSnapshot {
+        assert!(self.transfer.is_none(), "a transfer is already active");
+        let snapshot = transfer_api::start_transfer(self.selected_device(), &self.content);
+        self.transfer = Some(Box::new(snapshot));
+        self.transfer()
+            .expect("the transfer was initialized immediately above")
     }
 
-    pub fn cancel_transfer(&self, transfer_id: &str) {
-        transfer::cancel_transfer(transfer_id);
+    pub fn cancel_transfer(&mut self) {
+        let transfer = self
+            .transfer
+            .take()
+            .expect("an active transfer is required");
+        transfer_api::cancel_transfer(&transfer.id);
     }
 
-    fn with_device_visibility(mut devices: DeviceList, show_offline: bool) -> DeviceList {
-        if !show_offline {
-            devices.devices.retain(Device::is_online);
+    fn archive_defaults(&self) -> ArchiveDefaults {
+        let preferences = self.settings.read();
+        ArchiveDefaults {
+            format: preferences.default_format,
+            compression: preferences.compression_level,
         }
-        assert!(
-            devices
-                .devices
-                .iter()
-                .any(|device| device.id == devices.selected_id),
-            "selected device must remain visible"
-        );
-        devices
     }
 }

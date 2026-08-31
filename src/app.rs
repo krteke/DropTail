@@ -1,54 +1,42 @@
+use std::path::PathBuf;
+
 use relm4::actions::{AccelsPlus, RelmAction, RelmActionGroup};
 use relm4::adw::prelude::*;
 use relm4::gtk::glib;
 use relm4::{
-    Component, ComponentController, ComponentParts, ComponentSender, Controller, SimpleComponent,
-    adw, gtk,
+    Component, ComponentController, ComponentParts, ComponentSender, Controller, adw, gtk,
 };
 
-use crate::application::{AppService, ContentRequest};
+use crate::application::Application;
 use crate::components::content_panel::{ContentPanel, ContentPanelMsg, ContentPanelOutput};
 use crate::components::device_panel::{DevicePanel, DevicePanelMsg, DevicePanelOutput};
 use crate::components::preferences_dialog::PreferencesDialog;
 use crate::components::progress_panel::{ProgressPanel, ProgressPanelMsg};
-use crate::models::{ContentPreview, Device, PreferenceChange, SendMethod, TransferSnapshot};
+use crate::domain::content::{ArchiveFormat, ContentItem, SendMethod};
+use crate::domain::preferences::PreferenceChange;
+use crate::file_selection::{self, FileSelectionError};
 use crate::presentation::{format_size, send_method_label};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Page {
-    Compose,
-    Progress,
-}
-
-impl Page {
-    fn stack_name(self) -> &'static str {
-        match self {
-            Self::Compose => "compose",
-            Self::Progress => "progress",
-        }
-    }
-}
 
 pub struct App {
     window: adw::ApplicationWindow,
-    service: AppService,
+    state: Application,
     device_panel: Controller<DevicePanel>,
     content_panel: Controller<ContentPanel>,
     preferences: Controller<PreferencesDialog>,
     progress_panel: Controller<ProgressPanel>,
-    page: Page,
-    target: Device,
-    content: ContentPreview,
-    transfer: Option<TransferSnapshot>,
 }
 
 #[derive(Debug)]
 pub enum AppMsg {
-    DeviceSelected(Device),
+    DeviceSelected(String),
     AddFiles,
     AddFolder,
+    FilesSelected(Vec<PathBuf>),
+    FolderSelected(PathBuf),
+    SelectionDialogFailed(String),
     SendMethodRequested(SendMethod),
-    RemoveContentItem(String),
+    ArchiveFormatRequested(ArchiveFormat),
+    RemoveContentItem(PathBuf),
     PreferenceChanged(PreferenceChange),
     PrimaryAction,
     ShowPreferences,
@@ -58,45 +46,119 @@ pub enum AppMsg {
     ConfirmQuit,
 }
 
+#[derive(Debug)]
+pub enum AppCommandOutput {
+    ContentInspected(Result<Vec<ContentItem>, FileSelectionError>),
+}
+
 impl App {
+    fn is_transferring(&self) -> bool {
+        self.state.transfer().is_some()
+    }
+
+    fn page_name(&self) -> &'static str {
+        if self.is_transferring() {
+            "progress"
+        } else {
+            "compose"
+        }
+    }
+
     fn footer_title(&self) -> String {
-        match self.page {
-            Page::Progress => format!(
-                "正在发送 {} 个文件",
-                self.transfer
-                    .as_ref()
-                    .expect("progress page must have an active transfer")
-                    .item_count()
-            ),
-            Page::Compose if self.content.summary.is_ready() => format!(
-                "{} 个项目 · {} → {}",
-                self.content.summary.item_count,
-                format_size(self.content.summary.total_size_bytes),
-                self.target.name
-            ),
-            Page::Compose => format!("尚未选择内容 → {}", self.target.name),
+        if let Some(transfer) = self.state.transfer() {
+            return format!("正在发送 {} 个文件", transfer.item_count());
+        }
+
+        let content = self.state.content();
+        let target = self.state.selected_device();
+        if content.is_empty() {
+            format!("尚未选择内容 → {}", target.name)
+        } else {
+            match content.total_size_bytes() {
+                Some(size) => format!(
+                    "{} 个项目 · {} → {}",
+                    content.item_count(),
+                    format_size(size),
+                    target.name
+                ),
+                None => format!("{} 个项目 → {}", content.item_count(), target.name),
+            }
         }
     }
 
     fn footer_subtitle(&self) -> &str {
-        match self.page {
-            Page::Progress => "关闭窗口前应确认是否停止当前传输",
-            Page::Compose => send_method_label(self.content.summary.method),
+        if self.is_transferring() {
+            "关闭窗口前应确认是否停止当前传输"
+        } else {
+            send_method_label(self.state.content().send_method())
         }
     }
 
-    fn show_content(&mut self, content: ContentPreview) {
+    fn refresh_content_panel(&self) {
         self.content_panel
-            .emit(ContentPanelMsg::Show(content.clone()));
-        self.content = content;
+            .emit(ContentPanelMsg::Show(self.state.content().clone()));
+    }
+
+    fn choose_files(&self, sender: ComponentSender<Self>) {
+        let dialog = gtk::FileDialog::builder()
+            .title("选择要发送的文件")
+            .accept_label("选择")
+            .modal(true)
+            .build();
+        let window = self.window.clone();
+        drop(relm4::spawn_local(async move {
+            match dialog.open_multiple_future(Some(&window)).await {
+                Ok(files) => match local_paths(&files) {
+                    Some(paths) => sender.input(AppMsg::FilesSelected(paths)),
+                    None => sender.input(AppMsg::SelectionDialogFailed(
+                        "当前只能选择本地文件。".to_owned(),
+                    )),
+                },
+                Err(error) if dialog_was_cancelled(&error) => {}
+                Err(error) => {
+                    sender.input(AppMsg::SelectionDialogFailed(error.to_string()));
+                }
+            }
+        }));
+    }
+
+    fn choose_folder(&self, sender: ComponentSender<Self>) {
+        let dialog = gtk::FileDialog::builder()
+            .title("选择要发送的文件夹")
+            .accept_label("选择")
+            .modal(true)
+            .build();
+        let window = self.window.clone();
+        drop(relm4::spawn_local(async move {
+            match dialog.select_folder_future(Some(&window)).await {
+                Ok(folder) => match folder.path() {
+                    Some(path) => sender.input(AppMsg::FolderSelected(path)),
+                    None => sender.input(AppMsg::SelectionDialogFailed(
+                        "当前只能选择本地文件夹。".to_owned(),
+                    )),
+                },
+                Err(error) if dialog_was_cancelled(&error) => {}
+                Err(error) => {
+                    sender.input(AppMsg::SelectionDialogFailed(error.to_string()));
+                }
+            }
+        }));
+    }
+
+    fn show_error(&self, title: &str, message: &str) {
+        let dialog = adw::AlertDialog::new(Some(title), Some(message));
+        dialog.add_response("close", "关闭");
+        dialog.set_close_response("close");
+        dialog.present(Some(&self.window));
     }
 }
 
 #[relm4::component(pub)]
-impl SimpleComponent for App {
+impl Component for App {
     type Init = ();
     type Input = AppMsg;
     type Output = ();
+    type CommandOutput = AppCommandOutput;
 
     view! {
         #[root]
@@ -115,7 +177,7 @@ impl SimpleComponent for App {
                     pack_start = &gtk::Button {
                         set_tooltip_text: Some("添加文件"),
                         #[watch]
-                        set_sensitive: model.page == Page::Compose,
+                        set_sensitive: !model.is_transferring(),
                         connect_clicked => AppMsg::AddFiles,
 
                         #[wrap(Some)]
@@ -159,7 +221,7 @@ impl SimpleComponent for App {
                     add_named: (model.progress_panel.widget(), Some("progress")),
 
                     #[watch]
-                    set_visible_child_name: model.page.stack_name(),
+                    set_visible_child_name: model.page_name(),
                 },
 
                 #[name = "footer_box"]
@@ -203,14 +265,14 @@ impl SimpleComponent for App {
                         set_halign: gtk::Align::End,
 
                         #[watch]
-                        set_label: if model.page == Page::Compose { "发送" } else { "停止发送" },
+                        set_label: if model.is_transferring() { "停止发送" } else { "发送" },
                         #[watch]
-                        set_sensitive: model.page == Page::Progress || model.content.summary.is_ready(),
+                        set_sensitive: model.is_transferring() || !model.state.content().is_empty(),
                         #[watch]
-                        set_css_classes: if model.page == Page::Compose {
-                            &["suggested-action"]
-                        } else {
+                        set_css_classes: if model.is_transferring() {
                             &["destructive-action"]
+                        } else {
+                            &["suggested-action"]
                         },
                         connect_clicked => AppMsg::PrimaryAction,
                     },
@@ -237,15 +299,15 @@ impl SimpleComponent for App {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let service = AppService::new();
-        let bootstrap = service.bootstrap();
-        let target = bootstrap.selected_device;
-        let content = bootstrap.content;
+        let state = Application::new();
+        let preferences_data = state.preferences();
+        let visible_devices = state.visible_devices(preferences_data.show_offline_devices);
+        let content = state.content().clone();
 
-        let device_panel = DevicePanel::builder().launch(bootstrap.devices).forward(
+        let device_panel = DevicePanel::builder().launch(visible_devices).forward(
             sender.input_sender(),
             |output| match output {
-                DevicePanelOutput::Selected(device) => AppMsg::DeviceSelected(device),
+                DevicePanelOutput::Selected(device_id) => AppMsg::DeviceSelected(device_id),
             },
         );
         let content_panel = ContentPanel::builder().launch(content.clone()).forward(
@@ -254,25 +316,24 @@ impl SimpleComponent for App {
                 ContentPanelOutput::AddFiles => AppMsg::AddFiles,
                 ContentPanelOutput::AddFolder => AppMsg::AddFolder,
                 ContentPanelOutput::ChangeSendMethod(method) => AppMsg::SendMethodRequested(method),
+                ContentPanelOutput::ChangeArchiveFormat(format) => {
+                    AppMsg::ArchiveFormatRequested(format)
+                }
                 ContentPanelOutput::RemoveItem(item_id) => AppMsg::RemoveContentItem(item_id),
             },
         );
         let preferences = PreferencesDialog::builder()
-            .launch(bootstrap.preferences)
+            .launch(preferences_data)
             .forward(sender.input_sender(), AppMsg::PreferenceChanged);
         let progress_panel = ProgressPanel::builder().launch(()).detach();
 
         let model = Self {
             window: root.clone(),
-            service,
+            state,
             device_panel,
             content_panel,
             preferences,
             progress_panel,
-            page: Page::Compose,
-            target,
-            content,
-            transfer: None,
         };
 
         let compose_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -360,51 +421,62 @@ impl SimpleComponent for App {
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         match msg {
-            AppMsg::DeviceSelected(device) => self.target = device,
-            AppMsg::AddFiles => {
-                let content = self.service.fetch_content(ContentRequest::Files);
-                self.show_content(content);
+            AppMsg::DeviceSelected(device_id) => {
+                self.state.select_device(&device_id);
             }
-            AppMsg::AddFolder => {
-                let content = self.service.fetch_content(ContentRequest::Folder);
-                self.show_content(content);
+            AppMsg::AddFiles => self.choose_files(sender),
+            AppMsg::AddFolder => self.choose_folder(sender),
+            AppMsg::FilesSelected(paths) => {
+                sender.spawn_oneshot_command(move || {
+                    AppCommandOutput::ContentInspected(file_selection::inspect_files(paths))
+                });
+            }
+            AppMsg::FolderSelected(path) => {
+                sender.spawn_oneshot_command(move || {
+                    AppCommandOutput::ContentInspected(file_selection::inspect_folder(path))
+                });
+            }
+            AppMsg::SelectionDialogFailed(message) => {
+                self.show_error("无法添加所选内容", &message);
             }
             AppMsg::SendMethodRequested(method) => {
-                let content = self.service.fetch_content(ContentRequest::Method(method));
-                self.show_content(content);
+                self.state.set_send_method(method);
+                self.refresh_content_panel();
             }
-            AppMsg::RemoveContentItem(item_id) => {
-                let content = self.service.remove_content_item(&item_id);
-                self.show_content(content);
+            AppMsg::ArchiveFormatRequested(format) => {
+                self.state.set_archive_format(format);
+                self.refresh_content_panel();
+            }
+            AppMsg::RemoveContentItem(path) => {
+                self.state.remove_content(&path);
+                self.refresh_content_panel();
             }
             AppMsg::PreferenceChanged(change) => {
-                let refresh_devices = matches!(change, PreferenceChange::ShowOfflineDevices(_));
-                self.service
-                    .update_preference(change)
-                    .expect("GSettings preference must be writable");
-                if refresh_devices {
-                    let devices = self.service.fetch_devices(&self.target.id);
-                    self.device_panel.emit(DevicePanelMsg::Show(devices));
+                let show_offline = match change {
+                    PreferenceChange::ShowOfflineDevices(value) => Some(value),
+                    _ => None,
+                };
+                match self.state.update_preference(change) {
+                    Ok(()) => {
+                        if let Some(show_offline) = show_offline {
+                            self.device_panel.emit(DevicePanelMsg::Show(
+                                self.state.visible_devices(show_offline),
+                            ));
+                        }
+                    }
+                    Err(error) => self.show_error("首选项未保存", &error.to_string()),
                 }
             }
             AppMsg::PrimaryAction
-                if self.page == Page::Compose && self.content.summary.is_ready() =>
+                if !self.is_transferring() && !self.state.content().is_empty() =>
             {
-                let transfer = self.service.start_transfer(&self.target, &self.content);
-                self.progress_panel
-                    .emit(ProgressPanelMsg::Show(transfer.clone()));
-                self.transfer = Some(transfer);
-                self.page = Page::Progress;
+                let transfer = self.state.start_transfer().clone();
+                self.progress_panel.emit(ProgressPanelMsg::Show(transfer));
             }
-            AppMsg::PrimaryAction if self.page == Page::Progress => {
-                let transfer = self
-                    .transfer
-                    .take()
-                    .expect("progress page must have an active transfer");
-                self.service.cancel_transfer(&transfer.id);
-                self.page = Page::Compose;
+            AppMsg::PrimaryAction if self.is_transferring() => {
+                self.state.cancel_transfer();
             }
             AppMsg::PrimaryAction => {}
             AppMsg::ShowPreferences => {
@@ -432,14 +504,14 @@ impl SimpleComponent for App {
                     .build()
                     .present(Some(&self.window));
             }
-            AppMsg::CloseRequest if self.page == Page::Compose => {
+            AppMsg::CloseRequest if !self.is_transferring() => {
                 relm4::main_application().quit();
             }
             AppMsg::CloseRequest => {
                 let item_count = self
-                    .transfer
-                    .as_ref()
-                    .expect("progress page must have an active transfer")
+                    .state
+                    .transfer()
+                    .expect("a close confirmation requires an active transfer")
                     .item_count();
                 let body =
                     format!("当前传输尚未完成。关闭窗口会停止这 {item_count} 个文件的发送。");
@@ -456,15 +528,45 @@ impl SimpleComponent for App {
                 dialog.present(Some(&self.window));
             }
             AppMsg::ConfirmQuit => {
-                let transfer = self
-                    .transfer
-                    .take()
-                    .expect("quit confirmation requires an active transfer");
-                self.service.cancel_transfer(&transfer.id);
+                self.state.cancel_transfer();
                 relm4::main_application().quit();
             }
         }
     }
+
+    fn update_cmd(
+        &mut self,
+        msg: Self::CommandOutput,
+        _sender: ComponentSender<Self>,
+        _root: &Self::Root,
+    ) {
+        match msg {
+            AppCommandOutput::ContentInspected(Ok(items)) => {
+                self.state.add_content(items);
+                self.refresh_content_panel();
+            }
+            AppCommandOutput::ContentInspected(Err(error)) => {
+                self.show_error("无法添加所选内容", &error.to_string());
+            }
+        }
+    }
+}
+
+fn local_paths(files: &gtk::gio::ListModel) -> Option<Vec<PathBuf>> {
+    (0..files.n_items())
+        .map(|index| {
+            let file = files
+                .item(index)
+                .expect("file dialog list indices must be valid")
+                .downcast::<gtk::gio::File>()
+                .expect("file dialog results must contain GFile objects");
+            file.path()
+        })
+        .collect()
+}
+
+fn dialog_was_cancelled(error: &glib::Error) -> bool {
+    error.matches(gtk::DialogError::Cancelled) || error.matches(gtk::DialogError::Dismissed)
 }
 
 relm4::new_action_group!(WindowActionGroup, "win");

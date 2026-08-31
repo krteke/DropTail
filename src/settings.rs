@@ -1,13 +1,19 @@
 use relm4::gtk::gio::{self, prelude::*};
 use relm4::gtk::glib;
+use thiserror::Error;
 
-use crate::models::{ArchiveFormat, CompressionLevel, PreferenceChange, PreferencesData};
+use crate::domain::content::{ArchiveFormat, CompressionLevel};
+use crate::domain::preferences::{PreferenceChange, Preferences};
 
 const SCHEMA_ID: &str = "io.github.krteke.DropTail";
 
 pub struct SettingsStore {
     settings: gio::Settings,
 }
+
+#[derive(Debug, Error)]
+#[error("无法保存首选项：{0}")]
+pub struct SettingsError(#[from] glib::BoolError);
 
 impl SettingsStore {
     pub fn new() -> Self {
@@ -32,8 +38,8 @@ impl SettingsStore {
         }
     }
 
-    pub fn read(&self) -> PreferencesData {
-        PreferencesData {
+    pub fn read(&self) -> Preferences {
+        Preferences {
             notify_after_transfer: self.settings.boolean("notify-after-transfer"),
             inhibit_suspend: self.settings.boolean("inhibit-suspend"),
             show_offline_devices: self.settings.boolean("show-offline-devices"),
@@ -53,7 +59,7 @@ impl SettingsStore {
         }
     }
 
-    pub fn write(&self, change: PreferenceChange) -> Result<(), glib::BoolError> {
+    pub fn write(&self, change: PreferenceChange) -> Result<(), SettingsError> {
         match change {
             PreferenceChange::NotifyAfterTransfer(value) => {
                 self.settings.set_boolean("notify-after-transfer", value)
@@ -81,6 +87,7 @@ impl SettingsStore {
                     CompressionLevel::Smaller => 2,
                 },
             ),
-        }
+        }?;
+        Ok(())
     }
 }

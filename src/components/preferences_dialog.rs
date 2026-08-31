@@ -1,7 +1,8 @@
 use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, SimpleComponent, adw, gtk};
 
-use crate::models::{ArchiveFormat, CompressionLevel, PreferenceChange, PreferencesData};
+use crate::domain::content::{ArchiveFormat, CompressionLevel};
+use crate::domain::preferences::{PreferenceChange, Preferences};
 
 #[derive(Debug)]
 pub enum PreferencesDialogMsg {
@@ -13,12 +14,12 @@ pub enum PreferencesDialogMsg {
 }
 
 pub struct PreferencesDialog {
-    data: PreferencesData,
+    data: Preferences,
 }
 
 #[relm4::component(pub)]
 impl SimpleComponent for PreferencesDialog {
-    type Init = PreferencesData;
+    type Init = Preferences;
     type Input = PreferencesDialogMsg;
     type Output = PreferenceChange;
 

@@ -1,16 +1,22 @@
-use crate::models::{
-    ContentPreview, Device, TransferItemState, TransferQueueItem, TransferSnapshot,
-};
+use crate::domain::content::ContentSelection;
+use crate::domain::device::Device;
+use crate::domain::transfer::{TransferItemState, TransferQueueItem, TransferSnapshot};
 
-pub fn start_transfer(target: &Device, content: &ContentPreview) -> TransferSnapshot {
-    assert!(content.summary.is_ready());
+pub fn start_transfer(target: &Device, content: &ContentSelection) -> TransferSnapshot {
+    assert!(!content.is_empty());
+
+    let total_bytes = content.total_size_bytes().unwrap_or(0);
+    let progress = if total_bytes == 0 { 0.0 } else { 0.17 };
+    let transferred_bytes = (total_bytes as f64 * progress) as u64;
+    let bytes_per_second = if total_bytes == 0 { 0 } else { 40_055_603 };
+    let remaining_bytes = total_bytes.saturating_sub(transferred_bytes);
 
     let queue = content
-        .items
+        .items()
         .iter()
         .enumerate()
         .map(|(index, item)| TransferQueueItem {
-            name: item.name.clone(),
+            name: item.name().to_owned(),
             state: if index == 0 {
                 TransferItemState::Sending
             } else {
@@ -28,11 +34,15 @@ pub fn start_transfer(target: &Device, content: &ContentPreview) -> TransferSnap
         id: "mock-transfer-001".to_owned(),
         target: target.clone(),
         current_name,
-        progress: 0.17,
-        transferred_bytes: 315 * 1024 * 1024,
-        total_bytes: content.summary.total_size_bytes,
-        bytes_per_second: 40_055_603,
-        eta_seconds: 40,
+        progress,
+        transferred_bytes,
+        total_bytes,
+        bytes_per_second,
+        eta_seconds: if bytes_per_second == 0 {
+            0
+        } else {
+            remaining_bytes.div_ceil(bytes_per_second)
+        },
         queue,
     }
 }

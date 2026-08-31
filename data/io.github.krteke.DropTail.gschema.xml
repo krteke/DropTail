@@ -13,7 +13,7 @@
     <value nick="smaller" value="2" />
   </enum>
 
-  <schema id="io.github.krteke.DropTail" path="/io/github/droptail/Send/">
+  <schema id="io.github.krteke.DropTail" path="/io/github/krteke/DropTail/">
     <key name="notify-after-transfer" type="b">
       <default>true</default>
     </key>

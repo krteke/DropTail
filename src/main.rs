@@ -1,8 +1,9 @@
 mod app;
 mod application;
 mod components;
+mod domain;
+mod file_selection;
 mod mock_api;
-mod models;
 mod presentation;
 mod settings;
 

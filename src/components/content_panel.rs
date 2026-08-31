@@ -1,15 +1,16 @@
+use std::path::PathBuf;
+
 use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, SimpleComponent, adw, gtk};
 
-use crate::models::{
-    ArchiveFormat, ArchiveSettings, CompressionLevel, ContentItem, ContentItemKind, ContentKind,
-    ContentPreview, SendMethod,
+use crate::domain::content::{
+    ArchiveFormat, ArchiveSettings, CompressionLevel, ContentItem, ContentSelection, SendMethod,
 };
 use crate::presentation::format_size;
 
 #[derive(Debug)]
 pub enum ContentPanelMsg {
-    Show(ContentPreview),
+    Show(ContentSelection),
 }
 
 #[derive(Debug)]
@@ -17,30 +18,34 @@ pub enum ContentPanelOutput {
     AddFiles,
     AddFolder,
     ChangeSendMethod(SendMethod),
-    RemoveItem(String),
+    ChangeArchiveFormat(ArchiveFormat),
+    RemoveItem(PathBuf),
 }
 
 pub struct ContentPanel {
-    preview: ContentPreview,
+    selection: ContentSelection,
 }
 
 impl ContentPanel {
     fn description(&self) -> String {
-        if self.preview.summary.is_ready() {
-            format!(
-                "{} 个项目 · {}",
-                self.preview.summary.item_count,
-                format_size(self.preview.summary.total_size_bytes)
-            )
+        if self.selection.is_empty() {
+            "拖放或通过文件选择器添加".to_owned()
         } else {
-            "可拖放，也可通过文件选择器添加".to_owned()
+            match self.selection.total_size_bytes() {
+                Some(size) => format!(
+                    "{} 个项目 · {}",
+                    self.selection.item_count(),
+                    format_size(size)
+                ),
+                None => format!("{} 个项目", self.selection.item_count()),
+            }
         }
     }
 }
 
 #[relm4::component(pub)]
 impl SimpleComponent for ContentPanel {
-    type Init = ContentPreview;
+    type Init = ContentSelection;
     type Input = ContentPanelMsg;
     type Output = ContentPanelOutput;
 
@@ -94,7 +99,7 @@ impl SimpleComponent for ContentPanel {
                     set_valign: gtk::Align::Center,
 
                     #[watch]
-                    set_visible: model.preview.summary.is_ready(),
+                    set_visible: !model.selection.is_empty(),
 
                     gtk::Button {
                         set_label: "添加文件",
@@ -116,17 +121,17 @@ impl SimpleComponent for ContentPanel {
 
             adw::Bin {
                 #[watch]
-                set_child: Some(&build_content_page(&model.preview, sender.clone())),
+                set_child: Some(&build_content_page(&model.selection, sender.clone())),
             },
         }
     }
 
     fn init(
-        preview: Self::Init,
+        selection: Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let model = Self { preview };
+        let model = Self { selection };
         let widgets = view_output!();
 
         ComponentParts { model, widgets }
@@ -134,19 +139,19 @@ impl SimpleComponent for ContentPanel {
 
     fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
         match msg {
-            ContentPanelMsg::Show(preview) => self.preview = preview,
+            ContentPanelMsg::Show(selection) => self.selection = selection,
         }
     }
 }
 
 fn build_content_page(
-    preview: &ContentPreview,
+    selection: &ContentSelection,
     sender: ComponentSender<ContentPanel>,
 ) -> gtk::Widget {
-    match preview.kind {
-        ContentKind::Empty => build_empty_page(sender).upcast(),
-        ContentKind::Files => build_files_page(preview, sender).upcast(),
-        ContentKind::Archive => build_archive_page(preview, sender).upcast(),
+    match selection {
+        ContentSelection::Empty => build_empty_page(sender).upcast(),
+        ContentSelection::Separate(_) => build_files_page(selection, sender).upcast(),
+        ContentSelection::Archive { .. } => build_archive_page(selection, sender).upcast(),
     }
 }
 
@@ -171,15 +176,10 @@ fn build_empty_page(sender: ComponentSender<ContentPanel>) -> gtk::Frame {
     icon.set_pixel_size(42);
     icon.add_css_class("dim-label");
 
-    let title = gtk::Label::new(Some("拖放文件或文件夹到这里"));
+    let title = gtk::Label::new(Some("拖放文件或文件夹到此处"));
     title.add_css_class("title-3");
     title.set_wrap(true);
     title.set_justify(gtk::Justification::Center);
-
-    let subtitle = gtk::Label::new(Some("也可以使用下面的选择按钮"));
-    subtitle.add_css_class("dim-label");
-    subtitle.set_wrap(true);
-    subtitle.set_justify(gtk::Justification::Center);
 
     let actions = adw::WrapBox::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -189,7 +189,7 @@ fn build_empty_page(sender: ComponentSender<ContentPanel>) -> gtk::Frame {
         .justify(adw::JustifyMode::None)
         .justify_last_line(true)
         .build();
-    let file_button = gtk::Button::with_label("选择文件…");
+    let file_button = gtk::Button::with_label("选择文件...");
     file_button.set_tooltip_text(Some("选择文件"));
     file_button.connect_clicked({
         let sender = sender.clone();
@@ -197,7 +197,7 @@ fn build_empty_page(sender: ComponentSender<ContentPanel>) -> gtk::Frame {
             sender.output(ContentPanelOutput::AddFiles).ok();
         }
     });
-    let folder_button = gtk::Button::with_label("选择文件夹…");
+    let folder_button = gtk::Button::with_label("选择文件夹...");
     folder_button.set_tooltip_text(Some("选择文件夹"));
     folder_button.connect_clicked(move |_| {
         sender.output(ContentPanelOutput::AddFolder).ok();
@@ -207,18 +207,20 @@ fn build_empty_page(sender: ComponentSender<ContentPanel>) -> gtk::Frame {
 
     content.append(&icon);
     content.append(&title);
-    content.append(&subtitle);
     content.append(&actions);
     frame.set_child(Some(&content));
     frame
 }
 
-fn build_files_page(preview: &ContentPreview, sender: ComponentSender<ContentPanel>) -> gtk::Box {
+fn build_files_page(
+    selection: &ContentSelection,
+    sender: ComponentSender<ContentPanel>,
+) -> gtk::Box {
     let page = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(26)
         .build();
-    page.append(&build_file_list(&preview.items, sender.clone()));
+    page.append(&build_file_list(selection.items(), sender.clone()));
 
     let method_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -231,7 +233,7 @@ fn build_files_page(preview: &ContentPreview, sender: ComponentSender<ContentPan
     methods.add_css_class("boxed-list");
 
     let separate = gtk::CheckButton::new();
-    separate.set_active(preview.summary.method == SendMethod::Separate);
+    separate.set_active(selection.send_method() == SendMethod::Separate);
     separate.connect_toggled({
         let sender = sender.clone();
         move |button| {
@@ -252,7 +254,7 @@ fn build_files_page(preview: &ContentPreview, sender: ComponentSender<ContentPan
 
     let archive = gtk::CheckButton::new();
     archive.set_group(Some(&separate));
-    archive.set_active(preview.summary.method == SendMethod::Archive);
+    archive.set_active(selection.send_method() == SendMethod::Archive);
     archive.connect_toggled(move |button| {
         if button.is_active() {
             sender
@@ -273,49 +275,41 @@ fn build_files_page(preview: &ContentPreview, sender: ComponentSender<ContentPan
     page
 }
 
-fn build_archive_page(preview: &ContentPreview, sender: ComponentSender<ContentPanel>) -> gtk::Box {
-    let settings = preview
-        .archive
-        .as_ref()
+fn build_archive_page(
+    selection: &ContentSelection,
+    sender: ComponentSender<ContentPanel>,
+) -> gtk::Box {
+    let settings = selection
+        .archive_settings()
         .expect("archive preview must include archive settings");
     let page = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(20)
         .build();
-    page.append(&build_file_list(&preview.items, sender));
+    page.append(&build_file_list(selection.items(), sender.clone()));
 
     let settings_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
         .build();
     settings_box.append(&section_heading("发送方式"));
-    settings_box.append(&build_archive_settings(settings));
-
-    let note = gtk::Label::new(Some(
-        "准备归档时会显示单独进度；临时归档在发送结束或取消后自动清理。",
-    ));
-    note.set_halign(gtk::Align::Start);
-    note.set_xalign(0.0);
-    note.set_wrap(true);
-    note.add_css_class("caption");
-    note.add_css_class("dim-label");
-    settings_box.append(&note);
+    settings_box.append(&build_archive_settings(settings, sender));
 
     page.append(&settings_box);
     page
 }
 
-fn build_archive_settings(settings: &ArchiveSettings) -> gtk::Box {
+fn build_archive_settings(
+    settings: &ArchiveSettings,
+    sender: ComponentSender<ContentPanel>,
+) -> gtk::Box {
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
         .build();
     let group = adw::PreferencesGroup::new();
 
-    let name_row = adw::ActionRow::builder()
-        .title("归档名称")
-        .subtitle("接收设备最终看到的文件名")
-        .build();
+    let name_row = adw::ActionRow::builder().title("归档名称").build();
     let name_entry = gtk::Entry::builder()
         .text(&settings.archive_name)
         .hexpand(true)
@@ -338,6 +332,18 @@ fn build_archive_settings(settings: &ArchiveSettings) -> gtk::Box {
         ArchiveFormat::TarZst => 1,
         ArchiveFormat::TarGz => 2,
         ArchiveFormat::Zip => 3,
+    });
+    format_row.connect_selected_notify(move |row| {
+        let format = match row.selected() {
+            0 => ArchiveFormat::Tar,
+            1 => ArchiveFormat::TarZst,
+            2 => ArchiveFormat::TarGz,
+            3 => ArchiveFormat::Zip,
+            _ => unreachable!("archive format row only exposes four options"),
+        };
+        sender
+            .output(ContentPanelOutput::ChangeArchiveFormat(format))
+            .ok();
     });
     group.add(&format_row);
 
@@ -401,26 +407,28 @@ fn build_file_list(files: &[ContentItem], sender: ComponentSender<ContentPanel>)
     list.add_css_class("boxed-list");
 
     for file in files {
-        let detail = match file.kind {
-            ContentItemKind::File => "文件".to_owned(),
-            ContentItemKind::Folder { child_count } => format!("{child_count} 个项目"),
+        let detail = match file {
+            ContentItem::File { .. } => "文件".to_owned(),
+            ContentItem::Folder { file_count, .. } => format!("{file_count} 个文件"),
         };
         let row = adw::ActionRow::builder()
-            .title(&file.name)
+            .title(file.name())
             .subtitle(&detail)
             .build();
-        let icon_name = match file.kind {
-            ContentItemKind::File => "text-x-generic-symbolic",
-            ContentItemKind::Folder { .. } => "folder-symbolic",
+        let icon_name = match file {
+            ContentItem::File { .. } => "text-x-generic-symbolic",
+            ContentItem::Folder { .. } => "folder-symbolic",
         };
         let icon = gtk::Image::from_icon_name(icon_name);
         icon.set_pixel_size(20);
         row.add_prefix(&icon);
 
-        let size = gtk::Label::new(Some(&format_size(file.size_bytes)));
-        size.add_css_class("dim-label");
-        size.set_valign(gtk::Align::Center);
-        row.add_suffix(&size);
+        if let Some(size_bytes) = file.size_bytes() {
+            let size = gtk::Label::new(Some(&format_size(size_bytes)));
+            size.add_css_class("dim-label");
+            size.set_valign(gtk::Align::Center);
+            row.add_suffix(&size);
+        }
 
         let remove = gtk::Button::builder()
             .icon_name("edit-delete-symbolic")
@@ -428,12 +436,12 @@ fn build_file_list(files: &[ContentItem], sender: ComponentSender<ContentPanel>)
             .valign(gtk::Align::Center)
             .build();
         remove.add_css_class("flat");
-        let item_id = file.id.clone();
+        let item_path = file.path().to_owned();
         remove.connect_clicked({
             let sender = sender.clone();
             move |_| {
                 sender
-                    .output(ContentPanelOutput::RemoveItem(item_id.clone()))
+                    .output(ContentPanelOutput::RemoveItem(item_path.clone()))
                     .ok();
             }
         });

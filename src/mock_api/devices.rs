@@ -1,9 +1,8 @@
-use crate::models::{ConnectionKind, Device, DeviceKind, DeviceList};
+use crate::domain::device::{ConnectionKind, Device, DeviceKind, DeviceList};
 
 pub fn fetch_devices() -> DeviceList {
-    DeviceList {
-        selected_id: "pixel-9".to_owned(),
-        devices: vec![
+    DeviceList::new(
+        vec![
             Device {
                 id: "thinkpad-x1".to_owned(),
                 name: "ThinkPad X1".to_owned(),
@@ -37,5 +36,6 @@ pub fn fetch_devices() -> DeviceList {
                 connection: ConnectionKind::Offline,
             },
         ],
-    }
+        "pixel-9".to_owned(),
+    )
 }
