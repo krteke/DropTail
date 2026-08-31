@@ -1,93 +1,46 @@
 use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, SimpleComponent, adw, gtk};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContentMode {
-    Empty,
-    Files,
-    PackedFiles,
-    Folder,
+use crate::models::{
+    ArchiveFormat, ArchiveSettings, CompressionLevel, ContentItem, ContentItemKind, ContentKind,
+    ContentPreview, SendMethod,
+};
+use crate::presentation::format_size;
+
+#[derive(Debug)]
+pub enum ContentPanelMsg {
+    Show(ContentPreview),
 }
 
-impl ContentMode {
-    fn stack_name(self) -> &'static str {
-        match self {
-            Self::Empty => "empty",
-            Self::Files => "files",
-            Self::PackedFiles => "packed-files",
-            Self::Folder => "folder",
-        }
-    }
-
-    fn summary(self) -> ContentSummary {
-        match self {
-            Self::Empty => ContentSummary::EMPTY,
-            Self::Files => ContentSummary {
-                items: 3,
-                size: "1.83 GiB",
-                method: "分别发送",
-            },
-            Self::PackedFiles => ContentSummary {
-                items: 3,
-                size: "1.83 GiB",
-                method: "打包后发送",
-            },
-            Self::Folder => ContentSummary {
-                items: 2,
-                size: "1.33 GiB",
-                method: "打包后发送",
-            },
-        }
-    }
+#[derive(Debug)]
+pub enum ContentPanelOutput {
+    AddFiles,
+    AddFolder,
+    ChangeSendMethod(SendMethod),
+    RemoveItem(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ContentSummary {
-    pub items: u8,
-    pub size: &'static str,
-    pub method: &'static str,
+pub struct ContentPanel {
+    preview: ContentPreview,
 }
 
-impl ContentSummary {
-    pub const EMPTY: Self = Self {
-        items: 0,
-        size: "",
-        method: "添加文件后即可发送",
-    };
-
-    pub fn is_ready(self) -> bool {
-        self.items > 0
-    }
-
-    pub fn description(self) -> String {
-        if self.is_ready() {
-            format!("{} 个项目 · {}", self.items, self.size)
+impl ContentPanel {
+    fn description(&self) -> String {
+        if self.preview.summary.is_ready() {
+            format!(
+                "{} 个项目 · {}",
+                self.preview.summary.item_count,
+                format_size(self.preview.summary.total_size_bytes)
+            )
         } else {
             "可拖放，也可通过文件选择器添加".to_owned()
         }
     }
 }
 
-#[derive(Debug)]
-pub enum ContentPanelMsg {
-    PreviewFiles,
-    PreviewFolder,
-    PackFiles,
-    Reset,
-}
-
-#[derive(Debug)]
-pub enum ContentPanelOutput {
-    SummaryChanged(ContentSummary),
-}
-
-pub struct ContentPanel {
-    mode: ContentMode,
-}
-
 #[relm4::component(pub)]
 impl SimpleComponent for ContentPanel {
-    type Init = ();
+    type Init = ContentPreview;
     type Input = ContentPanelMsg;
     type Output = ContentPanelOutput;
 
@@ -125,7 +78,7 @@ impl SimpleComponent for ContentPanel {
 
                         gtk::Label {
                             #[watch]
-                            set_label: &model.mode.summary().description(),
+                            set_label: &model.description(),
                             set_halign: gtk::Align::Start,
                             set_xalign: 0.0,
                             set_wrap: true,
@@ -135,74 +88,65 @@ impl SimpleComponent for ContentPanel {
                 },
 
                 append = &gtk::Box {
-                        set_orientation: gtk::Orientation::Horizontal,
-                        set_spacing: 8,
-                        set_halign: gtk::Align::Start,
-                        set_valign: gtk::Align::Center,
+                    set_orientation: gtk::Orientation::Horizontal,
+                    set_spacing: 8,
+                    set_halign: gtk::Align::Start,
+                    set_valign: gtk::Align::Center,
 
-                        #[watch]
-                        set_visible: model.mode != ContentMode::Empty,
+                    #[watch]
+                    set_visible: model.preview.summary.is_ready(),
 
-                        gtk::Button {
-                            set_label: "添加文件",
-                            set_tooltip_text: Some("添加文件"),
-                            connect_clicked => ContentPanelMsg::PreviewFiles,
+                    gtk::Button {
+                        set_label: "添加文件",
+                        set_tooltip_text: Some("添加文件"),
+                        connect_clicked[sender] => move |_| {
+                            sender.output(ContentPanelOutput::AddFiles).ok();
                         },
+                    },
 
-                        gtk::Button {
-                            set_label: "添加文件夹",
-                            set_tooltip_text: Some("添加文件夹"),
-                            connect_clicked => ContentPanelMsg::PreviewFolder,
+                    gtk::Button {
+                        set_label: "添加文件夹",
+                        set_tooltip_text: Some("添加文件夹"),
+                        connect_clicked[sender] => move |_| {
+                            sender.output(ContentPanelOutput::AddFolder).ok();
                         },
+                    },
                 },
             },
 
-            #[name = "content_stack"]
-            gtk::Stack {
-                set_transition_type: gtk::StackTransitionType::Crossfade,
-                set_transition_duration: 180,
-                set_vhomogeneous: false,
-
-                add_named: (&empty_page, Some("empty")),
-                add_named: (&files_page, Some("files")),
-                add_named: (&packed_files_page, Some("packed-files")),
-                add_named: (&folder_page, Some("folder")),
-
+            adw::Bin {
                 #[watch]
-                set_visible_child_name: model.mode.stack_name(),
+                set_child: Some(&build_content_page(&model.preview, sender.clone())),
             },
         }
     }
 
     fn init(
-        _init: Self::Init,
+        preview: Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let model = Self {
-            mode: ContentMode::Empty,
-        };
-        let empty_page = build_empty_page(sender.clone());
-        let files_page = build_files_page(sender.clone());
-        let packed_files_page = build_archive_page(sender.clone(), ArchivePreview::Files);
-        let folder_page = build_archive_page(sender.clone(), ArchivePreview::Folder);
+        let model = Self { preview };
         let widgets = view_output!();
 
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
-        self.mode = match msg {
-            // TODO(integration): replace the fixtures with paths returned by a file chooser.
-            ContentPanelMsg::PreviewFiles => ContentMode::Files,
-            // TODO(integration): replace the fixture with a folder selected by the user.
-            ContentPanelMsg::PreviewFolder => ContentMode::Folder,
-            ContentPanelMsg::PackFiles => ContentMode::PackedFiles,
-            ContentPanelMsg::Reset => ContentMode::Empty,
-        };
-        sender
-            .output(ContentPanelOutput::SummaryChanged(self.mode.summary()))
-            .ok();
+    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
+        match msg {
+            ContentPanelMsg::Show(preview) => self.preview = preview,
+        }
+    }
+}
+
+fn build_content_page(
+    preview: &ContentPreview,
+    sender: ComponentSender<ContentPanel>,
+) -> gtk::Widget {
+    match preview.kind {
+        ContentKind::Empty => build_empty_page(sender).upcast(),
+        ContentKind::Files => build_files_page(preview, sender).upcast(),
+        ContentKind::Archive => build_archive_page(preview, sender).upcast(),
     }
 }
 
@@ -249,11 +193,15 @@ fn build_empty_page(sender: ComponentSender<ContentPanel>) -> gtk::Frame {
     file_button.set_tooltip_text(Some("选择文件"));
     file_button.connect_clicked({
         let sender = sender.clone();
-        move |_| sender.input(ContentPanelMsg::PreviewFiles)
+        move |_| {
+            sender.output(ContentPanelOutput::AddFiles).ok();
+        }
     });
     let folder_button = gtk::Button::with_label("选择文件夹…");
     folder_button.set_tooltip_text(Some("选择文件夹"));
-    folder_button.connect_clicked(move |_| sender.input(ContentPanelMsg::PreviewFolder));
+    folder_button.connect_clicked(move |_| {
+        sender.output(ContentPanelOutput::AddFolder).ok();
+    });
     actions.append(&file_button);
     actions.append(&folder_button);
 
@@ -265,116 +213,111 @@ fn build_empty_page(sender: ComponentSender<ContentPanel>) -> gtk::Frame {
     frame
 }
 
-fn build_files_page(sender: ComponentSender<ContentPanel>) -> gtk::Box {
+fn build_files_page(preview: &ContentPreview, sender: ComponentSender<ContentPanel>) -> gtk::Box {
     let page = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(26)
         .build();
-
-    let files = [
-        FilePreview::file("presentation.pdf", "17.5 MiB"),
-        FilePreview::file("dataset.csv.zst", "652 MiB"),
-        FilePreview::file("recording.mkv", "1.17 GiB"),
-    ];
-    page.append(&build_file_list(&files, sender.clone()));
+    page.append(&build_file_list(&preview.items, sender.clone()));
 
     let method_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
         .build();
-    method_box.append(&section_heading("发送方式", "只在选择内容需要决策时出现"));
+    method_box.append(&section_heading("发送方式"));
 
     let methods = gtk::ListBox::new();
     methods.set_selection_mode(gtk::SelectionMode::None);
     methods.add_css_class("boxed-list");
 
     let separate = gtk::CheckButton::new();
-    separate.set_active(true);
+    separate.set_active(preview.summary.method == SendMethod::Separate);
+    separate.connect_toggled({
+        let sender = sender.clone();
+        move |button| {
+            if button.is_active() {
+                sender
+                    .output(ContentPanelOutput::ChangeSendMethod(SendMethod::Separate))
+                    .ok();
+            }
+        }
+    });
     let separate_row = adw::ActionRow::builder()
         .title("分别发送")
-        .subtitle(
-            "每个文件都是独立的 Taildrop 传输。单个文件失败不会影响其他文件，接收端也不需要解压。",
-        )
         .activatable(true)
         .build();
     separate_row.add_prefix(&separate);
     separate_row.set_activatable_widget(Some(&separate));
     methods.append(&separate_row);
 
-    let packed = gtk::CheckButton::new();
-    packed.set_group(Some(&separate));
-    let packed_row = adw::ActionRow::builder()
-        .title("打成一个包")
-        .subtitle("接收端只得到一个归档文件，适合希望把这一批内容作为一个整体处理时。")
-        .activatable(true)
-        .build();
-    packed_row.add_prefix(&packed);
-    packed_row.set_activatable_widget(Some(&packed));
-    packed.connect_toggled(move |button| {
+    let archive = gtk::CheckButton::new();
+    archive.set_group(Some(&separate));
+    archive.set_active(preview.summary.method == SendMethod::Archive);
+    archive.connect_toggled(move |button| {
         if button.is_active() {
-            sender.input(ContentPanelMsg::PackFiles);
+            sender
+                .output(ContentPanelOutput::ChangeSendMethod(SendMethod::Archive))
+                .ok();
         }
     });
-    methods.append(&packed_row);
+    let archive_row = adw::ActionRow::builder()
+        .title("打包发送")
+        .activatable(true)
+        .build();
+    archive_row.add_prefix(&archive);
+    archive_row.set_activatable_widget(Some(&archive));
+    methods.append(&archive_row);
+
     method_box.append(&methods);
     page.append(&method_box);
-
     page
 }
 
-#[derive(Clone, Copy)]
-enum ArchivePreview {
-    Files,
-    Folder,
-}
-
-fn build_archive_page(sender: ComponentSender<ContentPanel>, preview: ArchivePreview) -> gtk::Box {
+fn build_archive_page(preview: &ContentPreview, sender: ComponentSender<ContentPanel>) -> gtk::Box {
+    let settings = preview
+        .archive
+        .as_ref()
+        .expect("archive preview must include archive settings");
     let page = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(20)
         .build();
+    page.append(&build_file_list(&preview.items, sender));
 
-    let files = match preview {
-        ArchivePreview::Files => vec![
-            FilePreview::file("presentation.pdf", "17.5 MiB"),
-            FilePreview::file("dataset.csv.zst", "652 MiB"),
-            FilePreview::file("recording.mkv", "1.17 GiB"),
-        ],
-        ArchivePreview::Folder => vec![
-            FilePreview::folder("Project Assets/", "412 个项目", "1.33 GiB"),
-            FilePreview::file("README.md", "17.6 KiB"),
-        ],
-    };
-    page.append(&build_file_list(&files, sender));
-
-    let settings = gtk::Box::builder()
+    let settings_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
         .build();
-    settings.append(&section_heading("发送方式", "只在选择内容需要决策时出现"));
+    settings_box.append(&section_heading("发送方式"));
+    settings_box.append(&build_archive_settings(settings));
 
-    let banner_text = match preview {
-        ArchivePreview::Files => "这些文件会先创建为一个归档，再把归档交给 Taildrop。",
-        ArchivePreview::Folder => {
-            "选择中包含文件夹。Taildrop 发送的是文件，因此这里会先创建一个归档，再把归档交给 Taildrop。"
-        }
-    };
-    let banner = adw::Banner::new(banner_text);
-    banner.set_revealed(true);
-    settings.append(&banner);
+    let note = gtk::Label::new(Some(
+        "准备归档时会显示单独进度；临时归档在发送结束或取消后自动清理。",
+    ));
+    note.set_halign(gtk::Align::Start);
+    note.set_xalign(0.0);
+    note.set_wrap(true);
+    note.add_css_class("caption");
+    note.add_css_class("dim-label");
+    settings_box.append(&note);
 
+    page.append(&settings_box);
+    page
+}
+
+fn build_archive_settings(settings: &ArchiveSettings) -> gtk::Box {
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .build();
     let group = adw::PreferencesGroup::new();
 
-    let archive_name = match preview {
-        ArchivePreview::Files => "Taildrop files.tar.zst",
-        ArchivePreview::Folder => "Project Assets + 1 item.tar.zst",
-    };
     let name_row = adw::ActionRow::builder()
         .title("归档名称")
         .subtitle("接收设备最终看到的文件名")
         .build();
     let name_entry = gtk::Entry::builder()
-        .text(archive_name)
+        .text(&settings.archive_name)
         .hexpand(true)
         .width_chars(28)
         .valign(gtk::Align::Center)
@@ -382,23 +325,22 @@ fn build_archive_page(sender: ComponentSender<ContentPanel>, preview: ArchivePre
     name_row.add_suffix(&name_entry);
     group.add(&name_row);
 
-    let format_row = adw::ComboRow::builder()
-        .title("归档格式")
-        .subtitle("目标设备是 Linux，tar.zst 通常兼顾速度、权限信息和体积。")
-        .build();
+    let format_row = adw::ComboRow::builder().title("归档格式").build();
     let formats = gtk::StringList::new(&[
-        "tar.zst · 推荐，快速压缩",
+        "tar · 仅打包",
+        "tar.zst · 体积更小",
         "tar.gz · 通用兼容",
         "zip · 跨平台",
     ]);
     format_row.set_model(Some(&formats));
-    format_row.set_selected(0);
+    format_row.set_selected(match settings.format {
+        ArchiveFormat::Auto | ArchiveFormat::TarZst => 0,
+        ArchiveFormat::TarGz => 1,
+        ArchiveFormat::Zip => 2,
+    });
     group.add(&format_row);
 
-    let compression_row = adw::ActionRow::builder()
-        .title("压缩级别")
-        .subtitle("不暴露算法数字，统一成能理解的目标")
-        .build();
+    let compression_row = adw::ActionRow::builder().title("压缩级别").build();
     let compression = adw::ToggleGroup::builder()
         .homogeneous(true)
         .can_shrink(true)
@@ -411,47 +353,36 @@ fn build_archive_page(sender: ComponentSender<ContentPanel>, preview: ArchivePre
             .label("平衡")
             .build(),
     );
-    compression.add(adw::Toggle::builder().name("small").label("更小").build());
-    compression.set_active_name(Some("balanced"));
+    compression.add(adw::Toggle::builder().name("smaller").label("更小").build());
+    compression.set_active_name(Some(match settings.compression {
+        CompressionLevel::Fast => "fast",
+        CompressionLevel::Balanced => "balanced",
+        CompressionLevel::Smaller => "smaller",
+    }));
     compression_row.add_suffix(&compression);
     group.add(&compression_row);
-    settings.append(&group);
+    content.append(&group);
 
     let advanced = adw::ExpanderRow::builder().title("更多打包选项").build();
     advanced.add_row(&check_row(
         "包含所选文件夹本身",
-        "关闭后只把文件夹中的内容放入归档根目录。",
-        true,
+        Some("关闭后只把文件夹中的内容放入归档根目录。"),
+        settings.include_selected_folder,
     ));
     advanced.add_row(&check_row(
         "包含隐藏文件",
-        "默认把所选目录当成一个完整目录，而不是替用户猜哪些内容“不重要”。",
-        true,
+        None,
+        settings.include_hidden_files,
     ));
-    advanced.add_row(&check_row(
-        "跟随符号链接",
-        "默认关闭，避免无意把链接指向的大目录也打包进去。",
-        false,
-    ));
+    advanced.add_row(&check_row("跟随符号链接", None, settings.follow_symlinks));
     let advanced_group = adw::PreferencesGroup::new();
     advanced_group.add(&advanced);
-    settings.append(&advanced_group);
+    content.append(&advanced_group);
 
-    let note = gtk::Label::new(Some(
-        "准备归档时会显示单独进度；临时归档在发送结束或取消后自动清理。",
-    ));
-    note.set_halign(gtk::Align::Start);
-    note.set_xalign(0.0);
-    note.set_wrap(true);
-    note.add_css_class("caption");
-    note.add_css_class("dim-label");
-    settings.append(&note);
-
-    page.append(&settings);
-    page
+    content
 }
 
-fn section_heading(title: &str, subtitle: &str) -> gtk::Box {
+fn section_heading(title: &str) -> gtk::Box {
     let heading = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(2)
@@ -459,59 +390,33 @@ fn section_heading(title: &str, subtitle: &str) -> gtk::Box {
     let title_label = gtk::Label::new(Some(title));
     title_label.set_halign(gtk::Align::Start);
     title_label.add_css_class("title-3");
-    let subtitle_label = gtk::Label::new(Some(subtitle));
-    subtitle_label.set_halign(gtk::Align::Start);
-    subtitle_label.set_xalign(0.0);
-    subtitle_label.set_wrap(true);
-    subtitle_label.add_css_class("dim-label");
     heading.append(&title_label);
-    heading.append(&subtitle_label);
     heading
 }
 
-#[derive(Clone, Copy)]
-struct FilePreview {
-    name: &'static str,
-    detail: &'static str,
-    size: &'static str,
-    icon_name: &'static str,
-}
-
-impl FilePreview {
-    const fn file(name: &'static str, size: &'static str) -> Self {
-        Self {
-            name,
-            detail: "文件",
-            size,
-            icon_name: "text-x-generic-symbolic",
-        }
-    }
-
-    const fn folder(name: &'static str, detail: &'static str, size: &'static str) -> Self {
-        Self {
-            name,
-            detail,
-            size,
-            icon_name: "folder-symbolic",
-        }
-    }
-}
-
-fn build_file_list(files: &[FilePreview], sender: ComponentSender<ContentPanel>) -> gtk::ListBox {
+fn build_file_list(files: &[ContentItem], sender: ComponentSender<ContentPanel>) -> gtk::ListBox {
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::None);
     list.add_css_class("boxed-list");
 
     for file in files {
+        let detail = match file.kind {
+            ContentItemKind::File => "文件".to_owned(),
+            ContentItemKind::Folder { child_count } => format!("{child_count} 个项目"),
+        };
         let row = adw::ActionRow::builder()
-            .title(file.name)
-            .subtitle(file.detail)
+            .title(&file.name)
+            .subtitle(&detail)
             .build();
-        let icon = gtk::Image::from_icon_name(file.icon_name);
+        let icon_name = match file.kind {
+            ContentItemKind::File => "text-x-generic-symbolic",
+            ContentItemKind::Folder { .. } => "folder-symbolic",
+        };
+        let icon = gtk::Image::from_icon_name(icon_name);
         icon.set_pixel_size(20);
         row.add_prefix(&icon);
 
-        let size = gtk::Label::new(Some(file.size));
+        let size = gtk::Label::new(Some(&format_size(file.size_bytes)));
         size.add_css_class("dim-label");
         size.set_valign(gtk::Align::Center);
         row.add_suffix(&size);
@@ -522,9 +427,14 @@ fn build_file_list(files: &[FilePreview], sender: ComponentSender<ContentPanel>)
             .valign(gtk::Align::Center)
             .build();
         remove.add_css_class("flat");
+        let item_id = file.id.clone();
         remove.connect_clicked({
             let sender = sender.clone();
-            move |_| sender.input(ContentPanelMsg::Reset)
+            move |_| {
+                sender
+                    .output(ContentPanelOutput::RemoveItem(item_id.clone()))
+                    .ok();
+            }
         });
         row.add_suffix(&remove);
         list.append(&row);
@@ -533,12 +443,16 @@ fn build_file_list(files: &[FilePreview], sender: ComponentSender<ContentPanel>)
     list
 }
 
-fn check_row(title: &str, subtitle: &str, active: bool) -> adw::ActionRow {
-    let row = adw::ActionRow::builder()
-        .title(title)
-        .subtitle(subtitle)
-        .activatable(true)
-        .build();
+fn check_row(title: &str, subtitle: Option<&str>, active: bool) -> adw::ActionRow {
+    let row_builder = adw::ActionRow::builder().title(title);
+
+    let row = if let Some(subtitle) = subtitle {
+        row_builder.subtitle(subtitle)
+    } else {
+        row_builder
+    }
+    .activatable(true)
+    .build();
     let check = gtk::CheckButton::builder()
         .active(active)
         .valign(gtk::Align::Center)

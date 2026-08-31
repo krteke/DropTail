@@ -1,5 +1,9 @@
 mod app;
+mod application;
 mod components;
+mod mock_api;
+mod models;
+mod presentation;
 
 use relm4::RelmApp;
 

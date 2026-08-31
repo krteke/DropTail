@@ -6,12 +6,13 @@ use relm4::{
     adw, gtk,
 };
 
-use crate::components::content_panel::{
-    ContentPanel, ContentPanelMsg, ContentPanelOutput, ContentSummary,
-};
-use crate::components::device_panel::{DevicePanel, DevicePanelOutput, DeviceSummary};
+use crate::application::{AppService, ContentRequest};
+use crate::components::content_panel::{ContentPanel, ContentPanelMsg, ContentPanelOutput};
+use crate::components::device_panel::{DevicePanel, DevicePanelOutput};
 use crate::components::preferences_dialog::PreferencesDialog;
 use crate::components::progress_panel::{ProgressPanel, ProgressPanelMsg};
+use crate::models::{ContentPreview, Device, PreferenceChange, SendMethod, TransferSnapshot};
+use crate::presentation::{format_size, send_method_label};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -30,21 +31,25 @@ impl Page {
 
 pub struct App {
     window: adw::ApplicationWindow,
+    service: AppService,
     device_panel: Controller<DevicePanel>,
     content_panel: Controller<ContentPanel>,
     preferences: Controller<PreferencesDialog>,
     progress_panel: Controller<ProgressPanel>,
     page: Page,
-    target: DeviceSummary,
-    content: ContentSummary,
+    target: Device,
+    content: ContentPreview,
+    transfer: Option<TransferSnapshot>,
 }
 
 #[derive(Debug)]
 pub enum AppMsg {
-    DeviceSelected(DeviceSummary),
-    ContentChanged(ContentSummary),
+    DeviceSelected(Device),
     AddFiles,
     AddFolder,
+    SendMethodRequested(SendMethod),
+    RemoveContentItem(String),
+    PreferenceChanged(PreferenceChange),
     PrimaryAction,
     ShowPreferences,
     ShowShortcuts,
@@ -56,20 +61,34 @@ pub enum AppMsg {
 impl App {
     fn footer_title(&self) -> String {
         match self.page {
-            Page::Progress => format!("正在发送 {} 个文件", self.content.items),
-            Page::Compose if self.content.is_ready() => format!(
+            Page::Progress => format!(
+                "正在发送 {} 个文件",
+                self.transfer
+                    .as_ref()
+                    .expect("progress page must have an active transfer")
+                    .item_count()
+            ),
+            Page::Compose if self.content.summary.is_ready() => format!(
                 "{} 个项目 · {} → {}",
-                self.content.items, self.content.size, self.target.name
+                self.content.summary.item_count,
+                format_size(self.content.summary.total_size_bytes),
+                self.target.name
             ),
             Page::Compose => format!("尚未选择内容 → {}", self.target.name),
         }
     }
 
-    fn footer_subtitle(&self) -> &'static str {
+    fn footer_subtitle(&self) -> &str {
         match self.page {
             Page::Progress => "关闭窗口前应确认是否停止当前传输",
-            Page::Compose => self.content.method,
+            Page::Compose => send_method_label(self.content.summary.method),
         }
+    }
+
+    fn show_content(&mut self, content: ContentPreview) {
+        self.content_panel
+            .emit(ContentPanelMsg::Show(content.clone()));
+        self.content = content;
     }
 }
 
@@ -186,7 +205,7 @@ impl SimpleComponent for App {
                         #[watch]
                         set_label: if model.page == Page::Compose { "发送" } else { "停止发送" },
                         #[watch]
-                        set_sensitive: model.page == Page::Progress || model.content.is_ready(),
+                        set_sensitive: model.page == Page::Progress || model.content.summary.is_ready(),
                         #[watch]
                         set_css_classes: if model.page == Page::Compose {
                             &["suggested-action"]
@@ -218,32 +237,42 @@ impl SimpleComponent for App {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let device_panel = DevicePanel::builder().launch(()).forward(
+        let service = AppService;
+        let bootstrap = service.bootstrap();
+        let target = bootstrap.selected_device;
+        let content = bootstrap.content;
+
+        let device_panel = DevicePanel::builder().launch(bootstrap.devices).forward(
             sender.input_sender(),
             |output| match output {
                 DevicePanelOutput::Selected(device) => AppMsg::DeviceSelected(device),
             },
         );
-        let content_panel = ContentPanel::builder().launch(()).forward(
+        let content_panel = ContentPanel::builder().launch(content.clone()).forward(
             sender.input_sender(),
             |output| match output {
-                ContentPanelOutput::SummaryChanged(summary) => AppMsg::ContentChanged(summary),
+                ContentPanelOutput::AddFiles => AppMsg::AddFiles,
+                ContentPanelOutput::AddFolder => AppMsg::AddFolder,
+                ContentPanelOutput::ChangeSendMethod(method) => AppMsg::SendMethodRequested(method),
+                ContentPanelOutput::RemoveItem(item_id) => AppMsg::RemoveContentItem(item_id),
             },
         );
-        let preferences = PreferencesDialog::builder().launch(()).detach();
-        let progress_panel = ProgressPanel::builder()
-            .launch(DeviceSummary::PIXEL_9)
-            .detach();
+        let preferences = PreferencesDialog::builder()
+            .launch(bootstrap.preferences)
+            .forward(sender.input_sender(), AppMsg::PreferenceChanged);
+        let progress_panel = ProgressPanel::builder().launch(()).detach();
 
         let model = Self {
             window: root.clone(),
+            service,
             device_panel,
             content_panel,
             preferences,
             progress_panel,
             page: Page::Compose,
-            target: DeviceSummary::PIXEL_9,
-            content: ContentSummary::EMPTY,
+            target,
+            content,
+            transfer: None,
         };
 
         let compose_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -334,24 +363,39 @@ impl SimpleComponent for App {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
             AppMsg::DeviceSelected(device) => self.target = device,
-            AppMsg::ContentChanged(summary) => self.content = summary,
             AppMsg::AddFiles => {
-                self.content_panel.emit(ContentPanelMsg::PreviewFiles);
+                let content = self.service.fetch_content(ContentRequest::Files);
+                self.show_content(content);
             }
             AppMsg::AddFolder => {
-                self.content_panel.emit(ContentPanelMsg::PreviewFolder);
+                let content = self.service.fetch_content(ContentRequest::Folder);
+                self.show_content(content);
             }
-            AppMsg::PrimaryAction if self.page == Page::Compose && self.content.is_ready() => {
+            AppMsg::SendMethodRequested(method) => {
+                let content = self.service.fetch_content(ContentRequest::Method(method));
+                self.show_content(content);
+            }
+            AppMsg::RemoveContentItem(item_id) => {
+                let content = self.service.remove_content_item(&item_id);
+                self.show_content(content);
+            }
+            AppMsg::PreferenceChanged(change) => self.service.update_preference(change),
+            AppMsg::PrimaryAction
+                if self.page == Page::Compose && self.content.summary.is_ready() =>
+            {
+                let transfer = self.service.start_transfer(&self.target, &self.content);
                 self.progress_panel
-                    .emit(ProgressPanelMsg::SetTarget(self.target));
+                    .emit(ProgressPanelMsg::Show(transfer.clone()));
+                self.transfer = Some(transfer);
                 self.page = Page::Progress;
-
-                // TODO(integration): start the real Taildrop transfer here.
             }
             AppMsg::PrimaryAction if self.page == Page::Progress => {
+                let transfer = self
+                    .transfer
+                    .take()
+                    .expect("progress page must have an active transfer");
+                self.service.cancel_transfer(&transfer.id);
                 self.page = Page::Compose;
-
-                // TODO(integration): request cancellation from the transfer service here.
             }
             AppMsg::PrimaryAction => {}
             AppMsg::ShowPreferences => {
@@ -383,10 +427,14 @@ impl SimpleComponent for App {
                 relm4::main_application().quit();
             }
             AppMsg::CloseRequest => {
-                let dialog = adw::AlertDialog::new(
-                    Some("停止发送并退出？"),
-                    Some("当前传输尚未完成。关闭窗口会停止这 3 个文件的发送。"),
-                );
+                let item_count = self
+                    .transfer
+                    .as_ref()
+                    .expect("progress page must have an active transfer")
+                    .item_count();
+                let body =
+                    format!("当前传输尚未完成。关闭窗口会停止这 {item_count} 个文件的发送。");
+                let dialog = adw::AlertDialog::new(Some("停止发送并退出？"), Some(&body));
                 dialog.add_response("continue", "继续发送");
                 dialog.add_response("quit", "停止并退出");
                 dialog.set_close_response("continue");
@@ -399,7 +447,11 @@ impl SimpleComponent for App {
                 dialog.present(Some(&self.window));
             }
             AppMsg::ConfirmQuit => {
-                // TODO(integration): cancel the active transfer before quitting.
+                let transfer = self
+                    .transfer
+                    .take()
+                    .expect("quit confirmation requires an active transfer");
+                self.service.cancel_transfer(&transfer.id);
                 relm4::main_application().quit();
             }
         }

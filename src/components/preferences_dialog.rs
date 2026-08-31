@@ -1,6 +1,8 @@
 use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, SimpleComponent, adw, gtk};
 
+use crate::models::{ArchiveFormat, CompressionLevel, PreferenceChange, PreferencesData};
+
 #[derive(Debug)]
 pub enum PreferencesDialogMsg {
     NotifyAfterTransfer(bool),
@@ -9,13 +11,15 @@ pub enum PreferencesDialogMsg {
     CompressionLevel(u32),
 }
 
-pub struct PreferencesDialog;
+pub struct PreferencesDialog {
+    data: PreferencesData,
+}
 
 #[relm4::component(pub)]
 impl SimpleComponent for PreferencesDialog {
-    type Init = ();
+    type Init = PreferencesData;
     type Input = PreferencesDialogMsg;
-    type Output = ();
+    type Output = PreferenceChange;
 
     view! {
         #[root]
@@ -32,7 +36,7 @@ impl SimpleComponent for PreferencesDialog {
                     adw::SwitchRow {
                         set_title: "传输完成后通知",
                         set_subtitle: "窗口在后台或被其他窗口遮住时尤其有用。",
-                        set_active: true,
+                        set_active: model.data.notify_after_transfer,
                         connect_active_notify[sender] => move |row| {
                             sender.input(PreferencesDialogMsg::NotifyAfterTransfer(row.is_active()));
                         },
@@ -41,7 +45,7 @@ impl SimpleComponent for PreferencesDialog {
                     adw::SwitchRow {
                         set_title: "传输时阻止系统挂起",
                         set_subtitle: "仅在正在准备归档或发送文件时请求 inhibit。",
-                        set_active: true,
+                        set_active: model.data.inhibit_suspend,
                         connect_active_notify[sender] => move |row| {
                             sender.input(PreferencesDialogMsg::InhibitSuspend(row.is_active()));
                         },
@@ -54,7 +58,7 @@ impl SimpleComponent for PreferencesDialog {
                     #[name = "format_row"]
                     adw::ComboRow {
                         set_title: "默认格式",
-                        set_subtitle: "“自动”根据目标系统给出兼容性更好的建议，但每次发送仍可改。",
+                        set_subtitle: "默认归档格式。",
                         connect_selected_notify[sender] => move |row| {
                             sender.input(PreferencesDialogMsg::DefaultFormat(row.selected()));
                         },
@@ -63,48 +67,72 @@ impl SimpleComponent for PreferencesDialog {
                     #[name = "compression_row"]
                     adw::ComboRow {
                         set_title: "默认压缩级别",
-                        set_subtitle: "只影响启用了压缩的格式。",
+                        set_subtitle: "影响启用了压缩的格式。",
                         connect_selected_notify[sender] => move |row| {
                             sender.input(PreferencesDialogMsg::CompressionLevel(row.selected()));
                         },
                     },
-                },
-
-                adw::PreferencesGroup {
-                    set_description: Some(
-                        "刻意没有：带宽限制、强制 DERP/直连、接收目录、接收确认、传输历史、临时归档目录、自动删除源文件。前者属于 Tailscale，后者属于高级压缩工具，而不是易用发送器的核心。"
-                    ),
                 },
             },
         }
     }
 
     fn init(
-        _init: Self::Init,
+        data: Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let model = Self;
+        let model = Self { data };
         let widgets = view_output!();
 
-        let formats = gtk::StringList::new(&["自动", "tar.zst", "tar.gz", "zip"]);
+        let formats = gtk::StringList::new(&["tar", "tar.zst", "tar.gz", "zip"]);
         widgets.format_row.set_model(Some(&formats));
-        widgets.format_row.set_selected(0);
+        widgets
+            .format_row
+            .set_selected(match model.data.default_format {
+                ArchiveFormat::Auto => 0,
+                ArchiveFormat::TarZst => 1,
+                ArchiveFormat::TarGz => 2,
+                ArchiveFormat::Zip => 3,
+            });
+
         let compression = gtk::StringList::new(&["快速", "平衡", "更小"]);
         widgets.compression_row.set_model(Some(&compression));
-        widgets.compression_row.set_selected(1);
+        widgets
+            .compression_row
+            .set_selected(match model.data.compression_level {
+                CompressionLevel::Fast => 0,
+                CompressionLevel::Balanced => 1,
+                CompressionLevel::Smaller => 2,
+            });
 
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
-        match msg {
-            PreferencesDialogMsg::NotifyAfterTransfer(value)
-            | PreferencesDialogMsg::InhibitSuspend(value) => _ = value,
-            PreferencesDialogMsg::DefaultFormat(value)
-            | PreferencesDialogMsg::CompressionLevel(value) => _ = value,
-        }
-
-        // TODO(integration): persist these UI values when an application settings backend exists.
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
+        let change = match msg {
+            PreferencesDialogMsg::NotifyAfterTransfer(value) => {
+                PreferenceChange::NotifyAfterTransfer(value)
+            }
+            PreferencesDialogMsg::InhibitSuspend(value) => PreferenceChange::InhibitSuspend(value),
+            PreferencesDialogMsg::DefaultFormat(value) => {
+                PreferenceChange::DefaultFormat(match value {
+                    0 => ArchiveFormat::Auto,
+                    1 => ArchiveFormat::TarZst,
+                    2 => ArchiveFormat::TarGz,
+                    3 => ArchiveFormat::Zip,
+                    _ => unreachable!("format row only exposes four options"),
+                })
+            }
+            PreferencesDialogMsg::CompressionLevel(value) => {
+                PreferenceChange::CompressionLevel(match value {
+                    0 => CompressionLevel::Fast,
+                    1 => CompressionLevel::Balanced,
+                    2 => CompressionLevel::Smaller,
+                    _ => unreachable!("compression row only exposes three options"),
+                })
+            }
+        };
+        sender.output(change).ok();
     }
 }
