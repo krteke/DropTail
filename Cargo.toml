@@ -1,0 +1,8 @@
+[package]
+name = "droptail"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+relm4 = { version = "0.11.0", features = ["libadwaita", "gnome_50"] }
+relm4-components = { version = "0.11.0", features = ["libadwaita"] }
