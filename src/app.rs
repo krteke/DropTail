@@ -7,12 +7,13 @@ use relm4::{
     Component, ComponentController, ComponentParts, ComponentSender, Controller, adw, gtk,
 };
 
-use crate::application::Application;
+use crate::application::{Application, discover_devices};
 use crate::components::content_panel::{ContentPanel, ContentPanelMsg, ContentPanelOutput};
 use crate::components::device_panel::{DevicePanel, DevicePanelMsg, DevicePanelOutput};
 use crate::components::preferences_dialog::PreferencesDialog;
 use crate::components::progress_panel::{ProgressPanel, ProgressPanelMsg};
 use crate::domain::content::{ArchiveFormat, ContentItem, SendMethod};
+use crate::domain::device::DeviceList;
 use crate::domain::preferences::PreferenceChange;
 use crate::file_selection::{self, FileSelectionError};
 use crate::presentation::{format_size, send_method_label};
@@ -49,6 +50,7 @@ pub enum AppMsg {
 #[derive(Debug)]
 pub enum AppCommandOutput {
     ContentInspected(Result<Vec<ContentItem>, FileSelectionError>),
+    DevicesDiscovered(Result<DeviceList, String>),
 }
 
 impl App {
@@ -70,19 +72,25 @@ impl App {
         }
 
         let content = self.state.content();
-        let target = self.state.selected_device();
-        if content.is_empty() {
-            format!("尚未选择内容 → {}", target.name)
-        } else {
-            match content.total_size_bytes() {
-                Some(size) => format!(
-                    "{} 个项目 · {} → {}",
-                    content.item_count(),
-                    format_size(size),
-                    target.name
-                ),
-                None => format!("{} 个项目 → {}", content.item_count(), target.name),
+        let target_name = self
+            .state
+            .selected_device()
+            .map(|device| device.name.as_str());
+        match (content.is_empty(), content.total_size_bytes(), target_name) {
+            (true, _, Some(target)) => format!("尚未选择内容 → {target}"),
+            (true, _, None) => "尚未选择内容".to_owned(),
+            (false, Some(size), Some(target)) => format!(
+                "{} 个项目 · {} → {target}",
+                content.item_count(),
+                format_size(size)
+            ),
+            (false, None, Some(target)) => {
+                format!("{} 个项目 → {target}", content.item_count())
             }
+            (false, Some(size), None) => {
+                format!("{} 个项目 · {}", content.item_count(), format_size(size))
+            }
+            (false, None, None) => format!("{} 个项目", content.item_count()),
         }
     }
 
@@ -267,7 +275,9 @@ impl Component for App {
                         #[watch]
                         set_label: if model.is_transferring() { "停止发送" } else { "发送" },
                         #[watch]
-                        set_sensitive: model.is_transferring() || !model.state.content().is_empty(),
+                        set_sensitive: model.is_transferring()
+                            || (!model.state.content().is_empty()
+                                && model.state.selected_device().is_some()),
                         #[watch]
                         set_css_classes: if model.is_transferring() {
                             &["destructive-action"]
@@ -418,6 +428,12 @@ impl Component for App {
         }
         widgets.main_window.add_breakpoint(compact);
 
+        sender.spawn_oneshot_command(|| {
+            AppCommandOutput::DevicesDiscovered(
+                discover_devices().map_err(|error| error.to_string()),
+            )
+        });
+
         ComponentParts { model, widgets }
     }
 
@@ -470,7 +486,9 @@ impl Component for App {
                 }
             }
             AppMsg::PrimaryAction
-                if !self.is_transferring() && !self.state.content().is_empty() =>
+                if !self.is_transferring()
+                    && !self.state.content().is_empty()
+                    && self.state.selected_device().is_some() =>
             {
                 let transfer = self.state.start_transfer().clone();
                 self.progress_panel.emit(ProgressPanelMsg::Show(transfer));
@@ -547,6 +565,16 @@ impl Component for App {
             }
             AppCommandOutput::ContentInspected(Err(error)) => {
                 self.show_error("无法添加所选内容", &error.to_string());
+            }
+            AppCommandOutput::DevicesDiscovered(Ok(devices)) => {
+                self.state.replace_devices(devices);
+                let show_offline = self.state.preferences().show_offline_devices;
+                self.device_panel.emit(DevicePanelMsg::Show(
+                    self.state.visible_devices(show_offline),
+                ));
+            }
+            AppCommandOutput::DevicesDiscovered(Err(error)) => {
+                self.show_error("无法读取 Tailscale 设备", &error);
             }
         }
     }

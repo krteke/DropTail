@@ -6,8 +6,13 @@ use crate::domain::content::{
 use crate::domain::device::{Device, DeviceList};
 use crate::domain::preferences::{PreferenceChange, Preferences};
 use crate::domain::transfer::TransferSnapshot;
-use crate::mock_api::{devices as devices_api, transfer as transfer_api};
+use crate::mock_api::transfer as transfer_api;
 use crate::settings::{SettingsError, SettingsStore};
+use crate::tailscale::{self, LocalApiError};
+
+pub fn discover_devices() -> Result<DeviceList, LocalApiError> {
+    tailscale::fetch_devices().map(DeviceList::new)
+}
 
 pub struct Application {
     settings: SettingsStore,
@@ -20,7 +25,7 @@ impl Application {
     pub fn new() -> Self {
         Self {
             settings: SettingsStore::new(),
-            devices: devices_api::fetch_devices(),
+            devices: DeviceList::default(),
             content: ContentSelection::default(),
             transfer: None,
         }
@@ -34,8 +39,12 @@ impl Application {
         self.devices.with_offline_visible(show_offline)
     }
 
-    pub fn selected_device(&self) -> &Device {
+    pub fn selected_device(&self) -> Option<&Device> {
         self.devices.selected()
+    }
+
+    pub fn replace_devices(&mut self, devices: DeviceList) {
+        self.devices = devices;
     }
 
     pub fn select_device(&mut self, selected_id: &str) {
@@ -75,7 +84,10 @@ impl Application {
 
     pub fn start_transfer(&mut self) -> &TransferSnapshot {
         assert!(self.transfer.is_none(), "a transfer is already active");
-        let snapshot = transfer_api::start_transfer(self.selected_device(), &self.content);
+        let target = self
+            .selected_device()
+            .expect("an online target is required to start a transfer");
+        let snapshot = transfer_api::start_transfer(target, &self.content);
         self.transfer = Some(Box::new(snapshot));
         self.transfer()
             .expect("the transfer was initialized immediately above")

@@ -6,6 +6,7 @@ mod file_selection;
 mod mock_api;
 mod presentation;
 mod settings;
+mod tailscale;
 
 use relm4::RelmApp;
 

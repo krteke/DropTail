@@ -1,7 +1,8 @@
 use relm4::adw::prelude::*;
 use relm4::{Component, ComponentParts, ComponentSender, adw, gtk};
 
-use crate::domain::device::{Device, DeviceKind, DeviceList};
+use crate::domain::device::{Device, DeviceList};
+use crate::presentation::connection_label;
 
 #[derive(Debug)]
 pub enum DevicePanelMsg {
@@ -27,7 +28,11 @@ impl DevicePanel {
         for device in &self.devices {
             list.append(&build_device_row(device));
         }
-        list.select_row(list.row_at_index(selected as i32).as_ref());
+        if let Some(selected) = selected {
+            list.select_row(list.row_at_index(selected as i32).as_ref());
+        } else {
+            list.unselect_all();
+        }
     }
 }
 
@@ -121,16 +126,6 @@ fn build_device_row(device: &Device) -> adw::ActionRow {
     row.set_title_lines(1);
     row.set_subtitle_lines(1);
 
-    let icon_name = match device.kind {
-        DeviceKind::Computer => "computer-symbolic",
-        DeviceKind::Phone => "phone-symbolic",
-    };
-    let icon = gtk::Image::from_icon_name(icon_name);
-    icon.set_pixel_size(24);
-    icon.set_margin_start(6);
-    icon.set_margin_end(6);
-    row.add_prefix(&icon);
-
     let status = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .valign(gtk::Align::Center)
@@ -144,6 +139,13 @@ fn build_device_row(device: &Device) -> adw::ActionRow {
     online_label.set_halign(gtk::Align::End);
     online_label.add_css_class("caption");
     status.append(&online_label);
+    if device.is_online() {
+        let path_label = gtk::Label::new(Some(&connection_label(&device.connection)));
+        path_label.set_halign(gtk::Align::End);
+        path_label.add_css_class("caption");
+        path_label.add_css_class("dim-label");
+        status.append(&path_label);
+    }
     row.add_suffix(&status);
 
     row

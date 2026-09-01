@@ -1,9 +1,8 @@
 use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, SimpleComponent, adw, gtk};
 
-use crate::domain::device::{ConnectionKind, DeviceKind};
 use crate::domain::transfer::{TransferItemState, TransferSnapshot};
-use crate::presentation::{format_rate, format_size};
+use crate::presentation::{connection_label, format_rate, format_size};
 
 #[derive(Debug)]
 pub enum ProgressPanelMsg {
@@ -64,22 +63,15 @@ fn build_progress_content(snapshot: &TransferSnapshot) -> gtk::Box {
     target_list.set_selection_mode(gtk::SelectionMode::None);
     target_list.add_css_class("boxed-list");
 
-    let connection = match &snapshot.target.connection {
-        ConnectionKind::Online => "在线".to_owned(),
-        ConnectionKind::Offline => "离线".to_owned(),
-    };
-    let target_detail = format!("{} · {connection}", snapshot.target.address);
+    let target_detail = format!(
+        "{} · {}",
+        snapshot.target.address,
+        connection_label(&snapshot.target.connection)
+    );
     let target_row = adw::ActionRow::builder()
         .title(&snapshot.target.name)
         .subtitle(&target_detail)
         .build();
-    let icon_name = match snapshot.target.kind {
-        DeviceKind::Computer => "computer-symbolic",
-        DeviceKind::Phone => "phone-symbolic",
-    };
-    let target_icon = gtk::Image::from_icon_name(icon_name);
-    target_icon.set_pixel_size(24);
-    target_row.add_prefix(&target_icon);
     target_list.append(&target_row);
     content.append(&target_list);
 

@@ -1,4 +1,5 @@
 use crate::domain::content::SendMethod;
+use crate::domain::device::Connection;
 
 pub fn format_size(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
@@ -29,5 +30,14 @@ pub fn send_method_label(method: SendMethod) -> &'static str {
     match method {
         SendMethod::Separate => "分别发送",
         SendMethod::Archive => "打包后发送",
+    }
+}
+
+pub fn connection_label(connection: &Connection) -> String {
+    match connection {
+        Connection::Offline => "离线".to_owned(),
+        Connection::Direct => "直连".to_owned(),
+        Connection::Derp(region) => format!("DERP · {region}"),
+        Connection::PeerRelay(_) => "Peer Relay".to_owned(),
     }
 }
