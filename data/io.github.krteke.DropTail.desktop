@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=DropTail
+Comment=Send files with Tailscale Taildrop
+Exec=droptail
+Icon=send-to-symbolic
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;GTK;
+StartupNotify=true
+X-GNOME-UsesNotifications=true

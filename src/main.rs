@@ -2,6 +2,7 @@ mod app;
 mod application;
 mod archive;
 mod components;
+mod desktop;
 mod domain;
 mod file_selection;
 mod presentation;

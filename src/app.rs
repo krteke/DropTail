@@ -13,11 +13,13 @@ use crate::components::device_panel::{DevicePanel, DevicePanelMsg, DevicePanelOu
 use crate::components::preferences_dialog::PreferencesDialog;
 use crate::components::progress_panel::{ProgressPanel, ProgressPanelMsg};
 use crate::components::shortcuts_dialog::ShortcutsDialog;
+use crate::desktop::DesktopIntegration;
 use crate::domain::content::{
     ArchiveFormat, ArchiveOption, CompressionLevel, ContentItem, SendMethod,
 };
 use crate::domain::device::DeviceList;
 use crate::domain::preferences::PreferenceChange;
+use crate::domain::transfer::TransferSnapshot;
 use crate::file_selection::{self, FileSelectionError};
 use crate::presentation::{format_size, send_method_label};
 use crate::transfer::{self, TransferEvent};
@@ -30,6 +32,7 @@ pub struct App {
     preferences: Controller<PreferencesDialog>,
     progress_panel: Controller<ProgressPanel>,
     shortcuts_dialog: Controller<ShortcutsDialog>,
+    desktop: DesktopIntegration,
 }
 
 #[derive(Debug)]
@@ -127,6 +130,21 @@ impl App {
     fn refresh_content_panel(&self) {
         self.content_panel
             .emit(ContentPanelMsg::Show(self.state.content().clone()));
+    }
+
+    fn sync_suspend_inhibition(&mut self) {
+        if self.is_transferring() && self.state.preferences().inhibit_suspend {
+            self.desktop.inhibit_suspend(&self.window);
+        } else {
+            self.desktop.allow_suspend();
+        }
+    }
+
+    fn end_transfer(&mut self, id: u64) -> Option<TransferSnapshot> {
+        let transfer = self.state.end_transfer(id)?;
+        self.sync_suspend_inhibition();
+        self.progress_panel.emit(ProgressPanelMsg::Clear);
+        Some(transfer)
     }
 
     fn choose_files(&self, sender: ComponentSender<Self>) {
@@ -382,6 +400,7 @@ impl Component for App {
             preferences,
             progress_panel,
             shortcuts_dialog,
+            desktop: DesktopIntegration::new(),
         };
 
         let compose_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -524,12 +543,16 @@ impl Component for App {
                     PreferenceChange::ShowOfflineDevices(value) => Some(value),
                     _ => None,
                 };
+                let sync_suspend_inhibition = matches!(change, PreferenceChange::InhibitSuspend(_));
                 match self.state.update_preference(change) {
                     Ok(()) => {
                         if let Some(show_offline) = show_offline {
                             self.device_panel.emit(DevicePanelMsg::Show(
                                 self.state.visible_devices(show_offline),
                             ));
+                        }
+                        if sync_suspend_inhibition {
+                            self.sync_suspend_inhibition();
                         }
                     }
                     Err(error) => self.show_error("首选项未保存", &error.to_string()),
@@ -541,6 +564,7 @@ impl Component for App {
                     && self.state.selected_device().is_some() =>
             {
                 let task = self.state.start_transfer();
+                self.sync_suspend_inhibition();
                 self.progress_panel.emit(ProgressPanelMsg::Show(Box::new(
                     self.state
                         .transfer()
@@ -589,6 +613,7 @@ impl Component for App {
                     .expect("a transfer must exist while transferring")
                     .is_cancelling() =>
             {
+                self.desktop.allow_suspend();
                 relm4::main_application().quit();
             }
             AppMsg::CloseRequest => {
@@ -615,6 +640,7 @@ impl Component for App {
                 if self.is_transferring() {
                     self.state.cancel_transfer();
                 }
+                self.desktop.allow_suspend();
                 relm4::main_application().quit();
             }
         }
@@ -677,15 +703,19 @@ impl Component for App {
                     )));
                 }
             }
-            AppCommandOutput::Transfer(TransferEvent::Finished { id })
-            | AppCommandOutput::Transfer(TransferEvent::Cancelled { id }) => {
-                if self.state.end_transfer(id) {
-                    self.progress_panel.emit(ProgressPanelMsg::Clear);
+            AppCommandOutput::Transfer(TransferEvent::Finished { id }) => {
+                if let Some(transfer) = self.end_transfer(id)
+                    && self.state.preferences().notify_after_transfer
+                {
+                    self.desktop
+                        .notify_transfer_finished(&transfer.target().name, transfer.item_count());
                 }
             }
+            AppCommandOutput::Transfer(TransferEvent::Cancelled { id }) => {
+                self.end_transfer(id);
+            }
             AppCommandOutput::Transfer(TransferEvent::Failed { id, error }) => {
-                if self.state.end_transfer(id) {
-                    self.progress_panel.emit(ProgressPanelMsg::Clear);
+                if self.end_transfer(id).is_some() {
                     self.show_error("发送失败", &error.to_string());
                 }
             }

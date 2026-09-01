@@ -197,12 +197,16 @@ impl Application {
         true
     }
 
-    pub fn end_transfer(&mut self, id: u64) -> bool {
+    pub fn end_transfer(&mut self, id: u64) -> Option<TransferSnapshot> {
         if self.transfer().map(TransferSnapshot::id) != Some(id) {
-            return false;
+            return None;
         }
-        self.transfer = None;
-        true
+        Some(
+            self.transfer
+                .take()
+                .expect("the matching transfer must still exist")
+                .snapshot,
+        )
     }
 
     fn archive_defaults(&self) -> ArchiveDefaults {
