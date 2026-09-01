@@ -12,6 +12,7 @@ use crate::components::content_panel::{ContentPanel, ContentPanelMsg, ContentPan
 use crate::components::device_panel::{DevicePanel, DevicePanelMsg, DevicePanelOutput};
 use crate::components::preferences_dialog::PreferencesDialog;
 use crate::components::progress_panel::{ProgressPanel, ProgressPanelMsg};
+use crate::components::shortcuts_dialog::ShortcutsDialog;
 use crate::domain::content::{ArchiveFormat, ContentItem, SendMethod};
 use crate::domain::device::DeviceList;
 use crate::domain::preferences::PreferenceChange;
@@ -25,6 +26,7 @@ pub struct App {
     content_panel: Controller<ContentPanel>,
     preferences: Controller<PreferencesDialog>,
     progress_panel: Controller<ProgressPanel>,
+    shortcuts_dialog: Controller<ShortcutsDialog>,
 }
 
 #[derive(Debug)]
@@ -336,6 +338,7 @@ impl Component for App {
             .launch(preferences_data)
             .forward(sender.input_sender(), AppMsg::PreferenceChanged);
         let progress_panel = ProgressPanel::builder().launch(()).detach();
+        let shortcuts_dialog = ShortcutsDialog::builder().launch(()).detach();
 
         let model = Self {
             window: root.clone(),
@@ -344,6 +347,7 @@ impl Component for App {
             content_panel,
             preferences,
             progress_panel,
+            shortcuts_dialog,
         };
 
         let compose_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -501,15 +505,7 @@ impl Component for App {
                 self.preferences.widget().present(Some(&self.window));
             }
             AppMsg::ShowShortcuts => {
-                let dialog = adw::AlertDialog::new(
-                    Some("键盘快捷键"),
-                    Some(
-                        "Ctrl+O  添加文件\nCtrl+Shift+O  添加文件夹\nCtrl+,  打开首选项\nEsc  关闭当前对话框",
-                    ),
-                );
-                dialog.add_response("close", "关闭");
-                dialog.set_close_response("close");
-                dialog.present(Some(&self.window));
+                self.shortcuts_dialog.widget().present(Some(&self.window));
             }
             AppMsg::ShowAbout => {
                 adw::AboutDialog::builder()
