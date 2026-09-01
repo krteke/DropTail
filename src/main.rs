@@ -1,12 +1,13 @@
 mod app;
 mod application;
+mod archive;
 mod components;
 mod domain;
 mod file_selection;
-mod mock_api;
 mod presentation;
 mod settings;
 mod tailscale;
+mod transfer;
 
 use relm4::RelmApp;
 

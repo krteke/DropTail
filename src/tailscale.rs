@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::net::IpAddr;
 use std::time::Duration;
 
-use reqwest::blocking::Client;
+use reqwest::StatusCode;
+use reqwest::blocking::{Body, Client};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -14,12 +16,18 @@ const STATUS_URL: &str = "http://local-tailscaled.sock/localapi/v0/status";
 const TAILDROP_AVAILABLE: i32 = 1;
 const TAILDROP_OFFLINE: i32 = 5;
 
+pub struct LocalApiClient {
+    client: Client,
+}
+
 #[derive(Debug, Error)]
 pub enum LocalApiError {
     #[error("无法访问 tailscaled LocalAPI: {0}")]
     Request(#[from] reqwest::Error),
     #[error("tailscaled LocalAPI 返回了 HTTP {status}")]
     HttpStatus { status: u16 },
+    #[error("tailscaled 拒绝发送文件（HTTP {status}）：{message}")]
+    FilePutRejected { status: u16, message: String },
     #[error("tailscaled LocalAPI 返回了无效的状态数据: {0}")]
     InvalidStatus(#[from] serde_json::Error),
     #[error("Tailscale 当前未运行（BackendState: {state}）")]
@@ -34,29 +42,72 @@ pub enum LocalApiError {
     MissingName,
 }
 
-pub fn fetch_devices() -> Result<Vec<Device>, LocalApiError> {
-    let body = get_status()?;
-    parse_devices(&body)
-}
-
-fn get_status() -> Result<Vec<u8>, LocalApiError> {
-    let response = Client::builder()
-        .unix_socket(SOCKET_PATH)
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(5))
-        .user_agent(concat!("droptail/", env!("CARGO_PKG_VERSION")))
-        .build()?
-        .get(STATUS_URL)
-        .send()?;
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(LocalApiError::HttpStatus {
-            status: status.as_u16(),
-        });
+impl LocalApiClient {
+    pub fn new() -> Result<Self, LocalApiError> {
+        let client = Client::builder()
+            .unix_socket(SOCKET_PATH)
+            .connect_timeout(Duration::from_secs(2))
+            .user_agent(concat!("droptail/", env!("CARGO_PKG_VERSION")))
+            .build()?;
+        Ok(Self { client })
     }
 
-    Ok(response.bytes()?.to_vec())
+    pub fn devices(&self) -> Result<Vec<Device>, LocalApiError> {
+        let response = self
+            .client
+            .get(STATUS_URL)
+            .timeout(Duration::from_secs(5))
+            .send()?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(LocalApiError::HttpStatus {
+                status: status.as_u16(),
+            });
+        }
+
+        parse_devices(&response.bytes()?)
+    }
+
+    pub fn push_file<R>(
+        &self,
+        target_id: &str,
+        name: &str,
+        size: Option<u64>,
+        contents: R,
+    ) -> Result<(), LocalApiError>
+    where
+        R: Read + Send + 'static,
+    {
+        let body = match size {
+            Some(size) => Body::sized(contents, size),
+            None => Body::new(contents),
+        };
+        let response = self
+            .client
+            .put(file_put_url(target_id, name))
+            .body(body)
+            .send()?;
+        let status = response.status();
+        if status == StatusCode::OK {
+            response.bytes()?;
+            return Ok(());
+        }
+
+        let message = response.text()?.trim().to_owned();
+        Err(LocalApiError::FilePutRejected {
+            status: status.as_u16(),
+            message,
+        })
+    }
+}
+
+fn file_put_url(target_id: &str, name: &str) -> reqwest::Url {
+    let mut url = reqwest::Url::parse("http://local-tailscaled.sock")
+        .expect("the LocalAPI origin must be a valid URL");
+    url.path_segments_mut()
+        .expect("the LocalAPI HTTP URL must support path segments")
+        .extend(["localapi", "v0", "file-put", target_id, name]);
+    url
 }
 
 fn parse_devices(body: &[u8]) -> Result<Vec<Device>, LocalApiError> {
@@ -187,7 +238,184 @@ struct PeerStatus {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::{Cursor, Write};
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
+
+    #[test]
+    fn file_put_url_escapes_target_and_filename_as_path_segments() {
+        let url = file_put_url("node/id", "report #?.txt");
+
+        assert_eq!(
+            url.as_str(),
+            "http://local-tailscaled.sock/localapi/v0/file-put/node%2Fid/report%20%23%3F.txt"
+        );
+    }
+
+    #[test]
+    fn push_file_streams_a_sized_put_over_the_unix_socket() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time must be after the Unix epoch")
+            .as_nanos();
+        let socket_path = std::env::temp_dir().join(format!(
+            "droptail-localapi-{}-{unique}.sock",
+            std::process::id()
+        ));
+        let listener = UnixListener::bind(&socket_path).expect("test socket must be created");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test request must connect");
+            let mut request = Vec::new();
+            let (header_end, content_length) = loop {
+                let mut buffer = [0_u8; 1024];
+                let read = stream.read(&mut buffer).expect("test request must be read");
+                assert!(read > 0, "request ended before its headers");
+                request.extend_from_slice(&buffer[..read]);
+
+                let Some(header_end) = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4)
+                else {
+                    continue;
+                };
+                let headers = std::str::from_utf8(&request[..header_end])
+                    .expect("HTTP headers must be UTF-8");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .expect("request must contain Content-Length");
+                break (header_end, content_length);
+            };
+
+            while request.len() < header_end + content_length {
+                let mut buffer = [0_u8; 1024];
+                let read = stream.read(&mut buffer).expect("test body must be read");
+                assert!(read > 0, "request ended before its body");
+                request.extend_from_slice(&buffer[..read]);
+            }
+
+            let headers =
+                std::str::from_utf8(&request[..header_end]).expect("HTTP headers must be UTF-8");
+            assert!(
+                headers
+                    .starts_with("PUT /localapi/v0/file-put/node-1/notes%20%231.txt HTTP/1.1\r\n")
+            );
+            assert_eq!(&request[header_end..header_end + content_length], b"test");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{}\n")
+                .expect("test response must be written");
+        });
+
+        let client = LocalApiClient {
+            client: Client::builder()
+                .unix_socket(socket_path.clone())
+                .build()
+                .expect("test client must be built"),
+        };
+        client
+            .push_file("node-1", "notes #1.txt", Some(4), Cursor::new(*b"test"))
+            .expect("the LocalAPI PUT must succeed");
+
+        server.join().expect("test server must finish");
+        fs::remove_file(socket_path).expect("test socket must be removed");
+    }
+
+    #[test]
+    fn push_file_streams_an_unknown_length_body_with_chunked_encoding() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time must be after the Unix epoch")
+            .as_nanos();
+        let socket_path = std::env::temp_dir().join(format!(
+            "droptail-localapi-stream-{}-{unique}.sock",
+            std::process::id()
+        ));
+        let listener = UnixListener::bind(&socket_path).expect("test socket must be created");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test request must connect");
+            let mut request = Vec::new();
+            let header_end = loop {
+                let mut buffer = [0_u8; 1024];
+                let read = stream.read(&mut buffer).expect("test request must be read");
+                assert!(read > 0, "request ended before its headers");
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(header_end) = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4)
+                {
+                    break header_end;
+                }
+            };
+            let headers =
+                std::str::from_utf8(&request[..header_end]).expect("HTTP headers must be UTF-8");
+            assert!(!headers.to_ascii_lowercase().contains("content-length:"));
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("transfer-encoding: chunked")
+            );
+
+            while !request[header_end..].ends_with(b"0\r\n\r\n") {
+                let mut buffer = [0_u8; 1024];
+                let read = stream.read(&mut buffer).expect("test body must be read");
+                assert!(read > 0, "request ended before its final chunk");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let mut position = header_end;
+            let mut body = Vec::new();
+            loop {
+                let line_end = request[position..]
+                    .windows(2)
+                    .position(|window| window == b"\r\n")
+                    .map(|index| position + index)
+                    .expect("chunk size must end with CRLF");
+                let size = usize::from_str_radix(
+                    std::str::from_utf8(&request[position..line_end])
+                        .expect("chunk size must be ASCII"),
+                    16,
+                )
+                .expect("chunk size must be hexadecimal");
+                position = line_end + 2;
+                if size == 0 {
+                    break;
+                }
+                body.extend_from_slice(&request[position..position + size]);
+                position += size + 2;
+            }
+            assert_eq!(body, b"streamed archive");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{}\n")
+                .expect("test response must be written");
+        });
+
+        let client = LocalApiClient {
+            client: Client::builder()
+                .unix_socket(socket_path.clone())
+                .build()
+                .expect("test client must be built"),
+        };
+        client
+            .push_file(
+                "node-1",
+                "archive.tar.zst",
+                None,
+                Cursor::new(b"streamed archive"),
+            )
+            .expect("the streaming LocalAPI PUT must succeed");
+
+        server.join().expect("test server must finish");
+        fs::remove_file(socket_path).expect("test socket must be removed");
+    }
 
     const STATUS: &str = r#"
     {

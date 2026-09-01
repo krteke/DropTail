@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use relm4::gtk::gio::{self, prelude::*};
 use relm4::gtk::glib;
 use thiserror::Error;
@@ -42,6 +44,9 @@ impl SettingsStore {
         Preferences {
             notify_after_transfer: self.settings.boolean("notify-after-transfer"),
             inhibit_suspend: self.settings.boolean("inhibit-suspend"),
+            speed_sample_interval: Duration::from_millis(u64::from(
+                self.settings.uint("speed-sample-interval-ms"),
+            )),
             show_offline_devices: self.settings.boolean("show-offline-devices"),
             default_format: match self.settings.enum_("default-format") {
                 0 => ArchiveFormat::Tar,
@@ -67,6 +72,13 @@ impl SettingsStore {
             PreferenceChange::InhibitSuspend(value) => {
                 self.settings.set_boolean("inhibit-suspend", value)
             }
+            PreferenceChange::SpeedSampleInterval(value) => self.settings.set_uint(
+                "speed-sample-interval-ms",
+                value
+                    .as_millis()
+                    .try_into()
+                    .expect("the schema interval range must fit in u32"),
+            ),
             PreferenceChange::ShowOfflineDevices(value) => {
                 self.settings.set_boolean("show-offline-devices", value)
             }

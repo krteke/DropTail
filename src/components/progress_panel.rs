@@ -6,7 +6,8 @@ use crate::presentation::{connection_label, format_rate, format_size};
 
 #[derive(Debug)]
 pub enum ProgressPanelMsg {
-    Show(TransferSnapshot),
+    Show(Box<TransferSnapshot>),
+    Clear,
 }
 
 pub struct ProgressPanel {
@@ -48,7 +49,8 @@ impl SimpleComponent for ProgressPanel {
 
     fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
         match msg {
-            ProgressPanelMsg::Show(snapshot) => self.snapshot = Some(snapshot),
+            ProgressPanelMsg::Show(snapshot) => self.snapshot = Some(*snapshot),
+            ProgressPanelMsg::Clear => self.snapshot = None,
         }
     }
 }
@@ -65,11 +67,11 @@ fn build_progress_content(snapshot: &TransferSnapshot) -> gtk::Box {
 
     let target_detail = format!(
         "{} · {}",
-        snapshot.target.address,
-        connection_label(&snapshot.target.connection)
+        snapshot.target().address,
+        connection_label(&snapshot.target().connection)
     );
     let target_row = adw::ActionRow::builder()
-        .title(&snapshot.target.name)
+        .title(&snapshot.target().name)
         .subtitle(&target_detail)
         .build();
     target_list.append(&target_row);
@@ -79,7 +81,7 @@ fn build_progress_content(snapshot: &TransferSnapshot) -> gtk::Box {
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
         .build();
-    progress_section.append(&section_heading());
+    progress_section.append(&section_heading(snapshot));
     progress_section.append(&progress_card(snapshot));
     progress_section.append(&queue_list(snapshot));
     content.append(&progress_section);
@@ -87,7 +89,7 @@ fn build_progress_content(snapshot: &TransferSnapshot) -> gtk::Box {
     content
 }
 
-fn section_heading() -> gtk::Box {
+fn section_heading(snapshot: &TransferSnapshot) -> gtk::Box {
     let heading = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(2)
@@ -95,7 +97,11 @@ fn section_heading() -> gtk::Box {
     let title = gtk::Label::new(Some("正在发送"));
     title.set_halign(gtk::Align::Start);
     title.add_css_class("title-3");
-    let subtitle = gtk::Label::new(Some("当前文件与总体进度"));
+    let subtitle = gtk::Label::new(Some(if snapshot.progress().is_some() {
+        "当前文件与总体进度"
+    } else {
+        "正在生成归档与发送"
+    }));
     subtitle.set_halign(gtk::Align::Start);
     subtitle.add_css_class("dim-label");
     heading.append(&title);
@@ -124,53 +130,71 @@ fn progress_card(snapshot: &TransferSnapshot) -> gtk::Frame {
         .spacing(2)
         .hexpand(true)
         .build();
-    let filename = gtk::Label::new(Some(&snapshot.current_name));
+    let filename = gtk::Label::new(Some(snapshot.current_name()));
     filename.set_halign(gtk::Align::Start);
     filename.add_css_class("heading");
-    let status = gtk::Label::new(Some("Taildrop 正在发送"));
+    let status = gtk::Label::new(Some(if snapshot.is_cancelling() {
+        "Taildrop 正在停止"
+    } else {
+        "Taildrop 正在发送"
+    }));
     status.set_halign(gtk::Align::Start);
     status.add_css_class("dim-label");
     current.append(&filename);
     current.append(&status);
     header.append(&current);
 
-    let percentage_text = format!("{:.0}%", snapshot.progress * 100.0);
-    let percentage = gtk::Label::new(Some(&percentage_text));
-    percentage.set_valign(gtk::Align::Start);
-    percentage.add_css_class("title-3");
-    header.append(&percentage);
+    if let Some(progress) = snapshot.progress() {
+        let percentage_text = format!("{:.0}%", progress * 100.0);
+        let percentage = gtk::Label::new(Some(&percentage_text));
+        percentage.set_valign(gtk::Align::Start);
+        percentage.add_css_class("title-3");
+        header.append(&percentage);
+    }
     content.append(&header);
 
-    let progress = gtk::ProgressBar::new();
-    progress.set_fraction(snapshot.progress);
-    content.append(&progress);
+    if let Some(progress) = snapshot.progress() {
+        let progress_bar = gtk::ProgressBar::new();
+        progress_bar.set_fraction(progress);
+        content.append(&progress_bar);
 
-    let details = adw::WrapBox::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .child_spacing(12)
-        .line_spacing(4)
-        .justify(adw::JustifyMode::Spread)
-        .justify_last_line(true)
-        .build();
-    let transferred_text = format!(
-        "{} / {}",
-        format_size(snapshot.transferred_bytes),
-        format_size(snapshot.total_bytes)
-    );
-    let transferred = gtk::Label::new(Some(&transferred_text));
-    transferred.set_halign(gtk::Align::Start);
-    transferred.add_css_class("dim-label");
-    let rate_text = format!(
-        "{}   约 {} 秒",
-        format_rate(snapshot.bytes_per_second),
-        snapshot.eta_seconds
-    );
-    let rate = gtk::Label::new(Some(&rate_text));
-    rate.set_halign(gtk::Align::End);
-    rate.add_css_class("dim-label");
-    details.append(&transferred);
-    details.append(&rate);
-    content.append(&details);
+        let details = adw::WrapBox::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .child_spacing(12)
+            .line_spacing(4)
+            .justify(adw::JustifyMode::Spread)
+            .justify_last_line(true)
+            .build();
+        let (transferred_bytes, total_bytes) = snapshot
+            .progress_bytes()
+            .expect("known progress must include byte counts");
+        let transferred_text = format!(
+            "{} / {}",
+            format_size(transferred_bytes),
+            format_size(total_bytes)
+        );
+        let transferred = gtk::Label::new(Some(&transferred_text));
+        transferred.set_halign(gtk::Align::Start);
+        transferred.add_css_class("dim-label");
+        let rate_text = format!(
+            "{}   约 {} 秒",
+            format_rate(snapshot.bytes_per_second()),
+            snapshot
+                .eta_seconds()
+                .expect("known progress must include an ETA")
+        );
+        let rate = gtk::Label::new(Some(&rate_text));
+        rate.set_halign(gtk::Align::End);
+        rate.add_css_class("dim-label");
+        details.append(&transferred);
+        details.append(&rate);
+        content.append(&details);
+    } else {
+        let rate = gtk::Label::new(Some(&format_rate(snapshot.bytes_per_second())));
+        rate.set_halign(gtk::Align::Start);
+        rate.add_css_class("title-3");
+        content.append(&rate);
+    }
 
     frame.set_child(Some(&content));
     frame
@@ -181,11 +205,12 @@ fn queue_list(snapshot: &TransferSnapshot) -> gtk::ListBox {
     list.set_selection_mode(gtk::SelectionMode::None);
     list.add_css_class("boxed-list");
 
-    for item in &snapshot.queue {
+    for item in snapshot.queue() {
         let row = adw::ActionRow::builder().title(&item.name).build();
         let state = match item.state {
             TransferItemState::Sending => "发送中",
             TransferItemState::Waiting => "等待",
+            TransferItemState::Sent => "已发送",
         };
         let state_label = gtk::Label::new(Some(state));
         state_label.add_css_class("pill");

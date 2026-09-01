@@ -4,7 +4,8 @@ use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, SimpleComponent, adw, gtk};
 
 use crate::domain::content::{
-    ArchiveFormat, ArchiveSettings, CompressionLevel, ContentItem, ContentSelection, SendMethod,
+    ArchiveFormat, ArchiveOption, ArchiveSettings, CompressionLevel, ContentItem, ContentSelection,
+    SendMethod,
 };
 use crate::presentation::format_size;
 
@@ -19,6 +20,9 @@ pub enum ContentPanelOutput {
     AddFolder,
     ChangeSendMethod(SendMethod),
     ChangeArchiveFormat(ArchiveFormat),
+    ChangeArchiveName(String),
+    ChangeArchiveCompression(CompressionLevel),
+    ChangeArchiveOption(ArchiveOption, bool),
     RemoveItem(PathBuf),
 }
 
@@ -227,50 +231,7 @@ fn build_files_page(
         .spacing(12)
         .build();
     method_box.append(&section_heading("发送方式"));
-
-    let methods = gtk::ListBox::new();
-    methods.set_selection_mode(gtk::SelectionMode::None);
-    methods.add_css_class("boxed-list");
-
-    let separate = gtk::CheckButton::new();
-    separate.set_active(selection.send_method() == SendMethod::Separate);
-    separate.connect_toggled({
-        let sender = sender.clone();
-        move |button| {
-            if button.is_active() {
-                sender
-                    .output(ContentPanelOutput::ChangeSendMethod(SendMethod::Separate))
-                    .ok();
-            }
-        }
-    });
-    let separate_row = adw::ActionRow::builder()
-        .title("分别发送")
-        .activatable(true)
-        .build();
-    separate_row.add_prefix(&separate);
-    separate_row.set_activatable_widget(Some(&separate));
-    methods.append(&separate_row);
-
-    let archive = gtk::CheckButton::new();
-    archive.set_group(Some(&separate));
-    archive.set_active(selection.send_method() == SendMethod::Archive);
-    archive.connect_toggled(move |button| {
-        if button.is_active() {
-            sender
-                .output(ContentPanelOutput::ChangeSendMethod(SendMethod::Archive))
-                .ok();
-        }
-    });
-    let archive_row = adw::ActionRow::builder()
-        .title("打包发送")
-        .activatable(true)
-        .build();
-    archive_row.add_prefix(&archive);
-    archive_row.set_activatable_widget(Some(&archive));
-    methods.append(&archive_row);
-
-    method_box.append(&methods);
+    method_box.append(&build_send_method_selector(selection, sender));
     page.append(&method_box);
     page
 }
@@ -293,10 +254,70 @@ fn build_archive_page(
         .spacing(12)
         .build();
     settings_box.append(&section_heading("发送方式"));
+
+    if selection.can_send_separately() {
+        settings_box.append(&build_send_method_selector(selection, sender.clone()));
+    }
+
     settings_box.append(&build_archive_settings(settings, sender));
 
     page.append(&settings_box);
     page
+}
+
+fn build_send_method_selector(
+    selection: &ContentSelection,
+    sender: ComponentSender<ContentPanel>,
+) -> gtk::ListBox {
+    assert!(
+        selection.can_send_separately(),
+        "send method selection requires file-only content"
+    );
+
+    let methods = gtk::ListBox::new();
+    methods.set_selection_mode(gtk::SelectionMode::None);
+    methods.add_css_class("boxed-list");
+
+    let separate = gtk::CheckButton::new();
+    let archive = gtk::CheckButton::new();
+    archive.set_group(Some(&separate));
+    separate.set_active(selection.send_method() == SendMethod::Separate);
+    archive.set_active(selection.send_method() == SendMethod::Archive);
+
+    separate.connect_toggled({
+        let sender = sender.clone();
+        move |button| {
+            if button.is_active() {
+                sender
+                    .output(ContentPanelOutput::ChangeSendMethod(SendMethod::Separate))
+                    .ok();
+            }
+        }
+    });
+    let separate_row = adw::ActionRow::builder()
+        .title("分别发送")
+        .activatable(true)
+        .build();
+    separate_row.add_prefix(&separate);
+    separate_row.set_activatable_widget(Some(&separate));
+    methods.append(&separate_row);
+
+    archive.connect_toggled(move |button| {
+        if button.is_active() {
+            sender
+                .output(ContentPanelOutput::ChangeSendMethod(SendMethod::Archive))
+                .ok();
+        }
+    });
+    let archive_row = adw::ActionRow::builder()
+        .title("打包发送")
+        .activatable(true)
+        .build();
+    archive_row.add_prefix(&archive);
+    archive_row.set_activatable_widget(Some(&archive));
+    methods.append(&archive_row);
+
+    methods
 }
 
 fn build_archive_settings(
@@ -316,6 +337,16 @@ fn build_archive_settings(
         .width_chars(28)
         .valign(gtk::Align::Center)
         .build();
+    name_entry.connect_changed({
+        let sender = sender.clone();
+        move |entry| {
+            sender
+                .output(ContentPanelOutput::ChangeArchiveName(
+                    entry.text().to_string(),
+                ))
+                .ok();
+        }
+    });
     name_row.add_suffix(&name_entry);
     group.add(&name_row);
 
@@ -333,17 +364,20 @@ fn build_archive_settings(
         ArchiveFormat::TarGz => 2,
         ArchiveFormat::Zip => 3,
     });
-    format_row.connect_selected_notify(move |row| {
-        let format = match row.selected() {
-            0 => ArchiveFormat::Tar,
-            1 => ArchiveFormat::TarZst,
-            2 => ArchiveFormat::TarGz,
-            3 => ArchiveFormat::Zip,
-            _ => unreachable!("archive format row only exposes four options"),
-        };
-        sender
-            .output(ContentPanelOutput::ChangeArchiveFormat(format))
-            .ok();
+    format_row.connect_selected_notify({
+        let sender = sender.clone();
+        move |row| {
+            let format = match row.selected() {
+                0 => ArchiveFormat::Tar,
+                1 => ArchiveFormat::TarZst,
+                2 => ArchiveFormat::TarGz,
+                3 => ArchiveFormat::Zip,
+                _ => unreachable!("archive format row only exposes four options"),
+            };
+            sender
+                .output(ContentPanelOutput::ChangeArchiveFormat(format))
+                .ok();
+        }
     });
     group.add(&format_row);
 
@@ -366,6 +400,20 @@ fn build_archive_settings(
         CompressionLevel::Balanced => "balanced",
         CompressionLevel::Smaller => "smaller",
     }));
+    compression.connect_active_name_notify({
+        let sender = sender.clone();
+        move |group| {
+            let level = match group.active_name().as_deref() {
+                Some("fast") => CompressionLevel::Fast,
+                Some("balanced") => CompressionLevel::Balanced,
+                Some("smaller") => CompressionLevel::Smaller,
+                _ => unreachable!("compression group only exposes three named toggles"),
+            };
+            sender
+                .output(ContentPanelOutput::ChangeArchiveCompression(level))
+                .ok();
+        }
+    });
     compression_row.add_suffix(&compression);
     group.add(&compression_row);
     content.append(&group);
@@ -375,13 +423,23 @@ fn build_archive_settings(
         "包含所选文件夹本身",
         Some("关闭后只把文件夹中的内容放入归档根目录。"),
         settings.include_selected_folder,
+        ArchiveOption::IncludeSelectedFolder,
+        sender.clone(),
     ));
     advanced.add_row(&check_row(
         "包含隐藏文件",
         None,
         settings.include_hidden_files,
+        ArchiveOption::IncludeHiddenFiles,
+        sender.clone(),
     ));
-    advanced.add_row(&check_row("跟随符号链接", None, settings.follow_symlinks));
+    advanced.add_row(&check_row(
+        "跟随符号链接",
+        None,
+        settings.follow_symlinks,
+        ArchiveOption::FollowSymlinks,
+        sender,
+    ));
     let advanced_group = adw::PreferencesGroup::new();
     advanced_group.add(&advanced);
     content.append(&advanced_group);
@@ -452,7 +510,13 @@ fn build_file_list(files: &[ContentItem], sender: ComponentSender<ContentPanel>)
     list
 }
 
-fn check_row(title: &str, subtitle: Option<&str>, active: bool) -> adw::ActionRow {
+fn check_row(
+    title: &str,
+    subtitle: Option<&str>,
+    active: bool,
+    option: ArchiveOption,
+    sender: ComponentSender<ContentPanel>,
+) -> adw::ActionRow {
     let row_builder = adw::ActionRow::builder().title(title);
 
     let row = if let Some(subtitle) = subtitle {
@@ -466,6 +530,14 @@ fn check_row(title: &str, subtitle: Option<&str>, active: bool) -> adw::ActionRo
         .active(active)
         .valign(gtk::Align::Center)
         .build();
+    check.connect_toggled(move |check| {
+        sender
+            .output(ContentPanelOutput::ChangeArchiveOption(
+                option,
+                check.is_active(),
+            ))
+            .ok();
+    });
     row.add_suffix(&check);
     row.set_activatable_widget(Some(&check));
     row

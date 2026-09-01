@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use flate2::Compression;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveFormat {
     Tar,
@@ -9,7 +11,7 @@ pub enum ArchiveFormat {
 }
 
 impl ArchiveFormat {
-    fn extension(self) -> &'static str {
+    pub fn extension(self) -> &'static str {
         match self {
             Self::Tar => "tar",
             Self::TarZst => "tar.zst",
@@ -24,6 +26,39 @@ pub enum CompressionLevel {
     Fast,
     Balanced,
     Smaller,
+}
+
+impl CompressionLevel {
+    pub fn zstd_level(self) -> i32 {
+        match self {
+            CompressionLevel::Fast => 1,
+            CompressionLevel::Balanced => 3,
+            CompressionLevel::Smaller => 9,
+        }
+    }
+
+    pub fn gzip_level(self) -> Compression {
+        match self {
+            CompressionLevel::Fast => Compression::fast(),
+            CompressionLevel::Balanced => Compression::default(),
+            CompressionLevel::Smaller => Compression::best(),
+        }
+    }
+
+    pub fn zip_level(self) -> i64 {
+        match self {
+            CompressionLevel::Fast => 1,
+            CompressionLevel::Balanced => 6,
+            CompressionLevel::Smaller => 9,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveOption {
+    IncludeSelectedFolder,
+    IncludeHiddenFiles,
+    FollowSymlinks,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -162,6 +197,10 @@ impl ContentSelection {
         }
     }
 
+    pub fn can_send_separately(&self) -> bool {
+        !self.is_empty() && self.items().iter().all(|item| !item.is_folder())
+    }
+
     pub fn archive_settings(&self) -> Option<&ArchiveSettings> {
         match self {
             Self::Archive { settings, .. } => Some(settings),
@@ -209,6 +248,31 @@ impl ContentSelection {
         };
         settings.format = format;
         settings.refresh_name(items);
+    }
+
+    pub fn set_archive_name(&mut self, name: String) {
+        let Self::Archive { settings, .. } = self else {
+            panic!("archive name can only be changed for archived content")
+        };
+        settings.archive_name = name;
+    }
+
+    pub fn set_archive_compression(&mut self, compression: CompressionLevel) {
+        let Self::Archive { settings, .. } = self else {
+            panic!("compression can only be changed for archived content")
+        };
+        settings.compression = compression;
+    }
+
+    pub fn set_archive_option(&mut self, option: ArchiveOption, active: bool) {
+        let Self::Archive { settings, .. } = self else {
+            panic!("archive options can only be changed for archived content")
+        };
+        match option {
+            ArchiveOption::IncludeSelectedFolder => settings.include_selected_folder = active,
+            ArchiveOption::IncludeHiddenFiles => settings.include_hidden_files = active,
+            ArchiveOption::FollowSymlinks => settings.follow_symlinks = active,
+        }
     }
 
     pub fn remove(&mut self, path: &Path, defaults: ArchiveDefaults) {
@@ -290,9 +354,18 @@ mod tests {
         assert_eq!(selection.item_count(), 2);
         assert_eq!(selection.total_size_bytes(), Some(12));
         assert_eq!(selection.send_method(), SendMethod::Separate);
+        assert!(selection.can_send_separately());
+
+        selection.set_send_method(SendMethod::Archive, defaults());
+        assert_eq!(selection.send_method(), SendMethod::Archive);
+        assert!(selection.can_send_separately());
+
+        selection.set_send_method(SendMethod::Separate, defaults());
+        assert_eq!(selection.send_method(), SendMethod::Separate);
 
         selection.add(vec![folder.clone()], defaults());
         assert_eq!(selection.send_method(), SendMethod::Archive);
+        assert!(!selection.can_send_separately());
         assert_eq!(selection.total_size_bytes(), None);
         assert!(
             selection

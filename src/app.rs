@@ -13,11 +13,14 @@ use crate::components::device_panel::{DevicePanel, DevicePanelMsg, DevicePanelOu
 use crate::components::preferences_dialog::PreferencesDialog;
 use crate::components::progress_panel::{ProgressPanel, ProgressPanelMsg};
 use crate::components::shortcuts_dialog::ShortcutsDialog;
-use crate::domain::content::{ArchiveFormat, ContentItem, SendMethod};
+use crate::domain::content::{
+    ArchiveFormat, ArchiveOption, CompressionLevel, ContentItem, SendMethod,
+};
 use crate::domain::device::DeviceList;
 use crate::domain::preferences::PreferenceChange;
 use crate::file_selection::{self, FileSelectionError};
 use crate::presentation::{format_size, send_method_label};
+use crate::transfer::{self, TransferEvent};
 
 pub struct App {
     window: adw::ApplicationWindow,
@@ -39,6 +42,9 @@ pub enum AppMsg {
     SelectionDialogFailed(String),
     SendMethodRequested(SendMethod),
     ArchiveFormatRequested(ArchiveFormat),
+    ArchiveNameChanged(String),
+    ArchiveCompressionChanged(CompressionLevel),
+    ArchiveOptionChanged(ArchiveOption, bool),
     RemoveContentItem(PathBuf),
     PreferenceChanged(PreferenceChange),
     PrimaryAction,
@@ -53,6 +59,7 @@ pub enum AppMsg {
 pub enum AppCommandOutput {
     ContentInspected(Result<Vec<ContentItem>, FileSelectionError>),
     DevicesDiscovered(Result<DeviceList, String>),
+    Transfer(TransferEvent),
 }
 
 impl App {
@@ -70,6 +77,9 @@ impl App {
 
     fn footer_title(&self) -> String {
         if let Some(transfer) = self.state.transfer() {
+            if transfer.is_cancelling() {
+                return format!("正在停止 {} 个文件的发送", transfer.item_count());
+            }
             return format!("正在发送 {} 个文件", transfer.item_count());
         }
 
@@ -98,7 +108,16 @@ impl App {
 
     fn footer_subtitle(&self) -> &str {
         if self.is_transferring() {
-            "关闭窗口前应确认是否停止当前传输"
+            if self
+                .state
+                .transfer()
+                .expect("a transfer must exist while transferring")
+                .is_cancelling()
+            {
+                "正在等待当前请求停止"
+            } else {
+                "关闭窗口前应确认是否停止当前传输"
+            }
         } else {
             send_method_label(self.state.content().send_method())
         }
@@ -275,11 +294,17 @@ impl Component for App {
                         set_halign: gtk::Align::End,
 
                         #[watch]
-                        set_label: if model.is_transferring() { "停止发送" } else { "发送" },
+                        set_label: match model.state.transfer() {
+                            Some(transfer) if transfer.is_cancelling() => "正在停止…",
+                            Some(_) => "停止发送",
+                            None => "发送",
+                        },
                         #[watch]
-                        set_sensitive: model.is_transferring()
-                            || (!model.state.content().is_empty()
-                                && model.state.selected_device().is_some()),
+                        set_sensitive: match model.state.transfer() {
+                            Some(transfer) => !transfer.is_cancelling(),
+                            None => !model.state.content().is_empty()
+                                && model.state.selected_device().is_some(),
+                        },
                         #[watch]
                         set_css_classes: if model.is_transferring() {
                             &["destructive-action"]
@@ -330,6 +355,13 @@ impl Component for App {
                 ContentPanelOutput::ChangeSendMethod(method) => AppMsg::SendMethodRequested(method),
                 ContentPanelOutput::ChangeArchiveFormat(format) => {
                     AppMsg::ArchiveFormatRequested(format)
+                }
+                ContentPanelOutput::ChangeArchiveName(name) => AppMsg::ArchiveNameChanged(name),
+                ContentPanelOutput::ChangeArchiveCompression(compression) => {
+                    AppMsg::ArchiveCompressionChanged(compression)
+                }
+                ContentPanelOutput::ChangeArchiveOption(option, active) => {
+                    AppMsg::ArchiveOptionChanged(option, active)
                 }
                 ContentPanelOutput::RemoveItem(item_id) => AppMsg::RemoveContentItem(item_id),
             },
@@ -469,6 +501,15 @@ impl Component for App {
                 self.state.set_archive_format(format);
                 self.refresh_content_panel();
             }
+            AppMsg::ArchiveNameChanged(name) => {
+                self.state.set_archive_name(name);
+            }
+            AppMsg::ArchiveCompressionChanged(compression) => {
+                self.state.set_archive_compression(compression);
+            }
+            AppMsg::ArchiveOptionChanged(option, active) => {
+                self.state.set_archive_option(option, active);
+            }
             AppMsg::RemoveContentItem(path) => {
                 self.state.remove_content(&path);
                 self.refresh_content_panel();
@@ -494,11 +535,27 @@ impl Component for App {
                     && !self.state.content().is_empty()
                     && self.state.selected_device().is_some() =>
             {
-                let transfer = self.state.start_transfer().clone();
-                self.progress_panel.emit(ProgressPanelMsg::Show(transfer));
+                let task = self.state.start_transfer();
+                self.progress_panel.emit(ProgressPanelMsg::Show(Box::new(
+                    self.state
+                        .transfer()
+                        .expect("the transfer was started immediately above")
+                        .clone(),
+                )));
+                sender.spawn_command(move |output| {
+                    transfer::run(task, move |event| {
+                        output.emit(AppCommandOutput::Transfer(event));
+                    });
+                });
             }
             AppMsg::PrimaryAction if self.is_transferring() => {
                 self.state.cancel_transfer();
+                self.progress_panel.emit(ProgressPanelMsg::Show(Box::new(
+                    self.state
+                        .transfer()
+                        .expect("cancellation keeps the transfer active until the request stops")
+                        .clone(),
+                )));
             }
             AppMsg::PrimaryAction => {}
             AppMsg::ShowPreferences => {
@@ -519,6 +576,15 @@ impl Component for App {
                     .present(Some(&self.window));
             }
             AppMsg::CloseRequest if !self.is_transferring() => {
+                relm4::main_application().quit();
+            }
+            AppMsg::CloseRequest
+                if self
+                    .state
+                    .transfer()
+                    .expect("a transfer must exist while transferring")
+                    .is_cancelling() =>
+            {
                 relm4::main_application().quit();
             }
             AppMsg::CloseRequest => {
@@ -542,7 +608,9 @@ impl Component for App {
                 dialog.present(Some(&self.window));
             }
             AppMsg::ConfirmQuit => {
-                self.state.cancel_transfer();
+                if self.is_transferring() {
+                    self.state.cancel_transfer();
+                }
                 relm4::main_application().quit();
             }
         }
@@ -571,6 +639,48 @@ impl Component for App {
             }
             AppCommandOutput::DevicesDiscovered(Err(error)) => {
                 self.show_error("无法读取 Tailscale 设备", &error);
+            }
+            AppCommandOutput::Transfer(TransferEvent::Sample {
+                id,
+                item_index,
+                transferred_bytes,
+                bytes_per_second,
+            }) => {
+                if self.state.record_transfer_sample(
+                    id,
+                    item_index,
+                    transferred_bytes,
+                    bytes_per_second,
+                ) {
+                    self.progress_panel.emit(ProgressPanelMsg::Show(Box::new(
+                        self.state
+                            .transfer()
+                            .expect("progress requires an active transfer")
+                            .clone(),
+                    )));
+                }
+            }
+            AppCommandOutput::Transfer(TransferEvent::ItemFinished { id, item_index }) => {
+                if self.state.finish_transfer_item(id, item_index) {
+                    self.progress_panel.emit(ProgressPanelMsg::Show(Box::new(
+                        self.state
+                            .transfer()
+                            .expect("a finished item still belongs to an active transfer")
+                            .clone(),
+                    )));
+                }
+            }
+            AppCommandOutput::Transfer(TransferEvent::Finished { id })
+            | AppCommandOutput::Transfer(TransferEvent::Cancelled { id }) => {
+                if self.state.end_transfer(id) {
+                    self.progress_panel.emit(ProgressPanelMsg::Clear);
+                }
+            }
+            AppCommandOutput::Transfer(TransferEvent::Failed { id, error }) => {
+                if self.state.end_transfer(id) {
+                    self.progress_panel.emit(ProgressPanelMsg::Clear);
+                    self.show_error("发送失败", &error.to_string());
+                }
             }
         }
     }

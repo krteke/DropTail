@@ -20,6 +20,10 @@
     <key name="inhibit-suspend" type="b">
       <default>true</default>
     </key>
+    <key name="speed-sample-interval-ms" type="u">
+      <default>200</default>
+      <range min="100" max="5000" />
+    </key>
     <key name="show-offline-devices" type="b">
       <default>true</default>
     </key>

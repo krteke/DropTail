@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, SimpleComponent, adw, gtk};
 
@@ -8,6 +10,7 @@ use crate::domain::preferences::{PreferenceChange, Preferences};
 pub enum PreferencesDialogMsg {
     NotifyAfterTransfer(bool),
     InhibitSuspend(bool),
+    SpeedSampleInterval(u32),
     ShowOfflineDevices(bool),
     DefaultFormat(u32),
     CompressionLevel(u32),
@@ -43,6 +46,7 @@ impl SimpleComponent for PreferencesDialog {
                             sender.input(PreferencesDialogMsg::ShowOfflineDevices(row.is_active()));
                         },
                     },
+
                 },
 
                 adw::PreferencesGroup {
@@ -63,6 +67,18 @@ impl SimpleComponent for PreferencesDialog {
                         set_active: model.data.inhibit_suspend,
                         connect_active_notify[sender] => move |row| {
                             sender.input(PreferencesDialogMsg::InhibitSuspend(row.is_active()));
+                        },
+                    },
+
+                    #[name = "sample_interval_row"]
+                    adw::SpinRow {
+                        set_title: "速度采样间隔",
+                        set_subtitle: "用于刷新传输速度，单位为毫秒。",
+                        set_digits: 0,
+                        set_numeric: true,
+                        set_snap_to_ticks: true,
+                        connect_value_notify[sender] => move |row| {
+                            sender.input(PreferencesDialogMsg::SpeedSampleInterval(row.value() as u32));
                         },
                     },
                 },
@@ -98,7 +114,19 @@ impl SimpleComponent for PreferencesDialog {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let model = Self { data };
+        let sample_adjustment = gtk::Adjustment::new(
+            model.data.speed_sample_interval.as_millis() as f64,
+            100.0,
+            5000.0,
+            100.0,
+            500.0,
+            0.0,
+        );
         let widgets = view_output!();
+
+        widgets
+            .sample_interval_row
+            .set_adjustment(Some(&sample_adjustment));
 
         let formats = gtk::StringList::new(&["tar", "tar.zst", "tar.gz", "zip"]);
         widgets.format_row.set_model(Some(&formats));
@@ -130,6 +158,9 @@ impl SimpleComponent for PreferencesDialog {
                 PreferenceChange::NotifyAfterTransfer(value)
             }
             PreferencesDialogMsg::InhibitSuspend(value) => PreferenceChange::InhibitSuspend(value),
+            PreferencesDialogMsg::SpeedSampleInterval(value) => {
+                PreferenceChange::SpeedSampleInterval(Duration::from_millis(u64::from(value)))
+            }
             PreferencesDialogMsg::ShowOfflineDevices(value) => {
                 PreferenceChange::ShowOfflineDevices(value)
             }
