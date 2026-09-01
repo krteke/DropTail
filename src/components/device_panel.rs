@@ -8,15 +8,19 @@ use crate::presentation::connection_label;
 pub enum DevicePanelMsg {
     Show(DeviceList),
     Select(usize),
+    Refresh,
+    RefreshFinished,
 }
 
 #[derive(Debug)]
 pub enum DevicePanelOutput {
     Selected(String),
+    RefreshRequested,
 }
 
 pub struct DevicePanel {
     devices: Vec<Device>,
+    refreshing: bool,
 }
 
 impl DevicePanel {
@@ -53,13 +57,24 @@ impl Component for DevicePanel {
             set_margin_end: 24,
 
             gtk::Box {
-                set_orientation: gtk::Orientation::Vertical,
-                set_spacing: 2,
+                set_orientation: gtk::Orientation::Horizontal,
+                set_spacing: 8,
 
                 gtk::Label {
                     set_label: "发送到",
                     set_halign: gtk::Align::Start,
+                    set_hexpand: true,
                     add_css_class: "title-3",
+                },
+
+                gtk::Button {
+                    set_icon_name: "view-refresh-symbolic",
+                    set_tooltip_text: Some("刷新设备"),
+                    set_valign: gtk::Align::Center,
+                    add_css_class: "flat",
+                    #[watch]
+                    set_sensitive: !model.refreshing,
+                    connect_clicked => DevicePanelMsg::Refresh,
                 },
             },
 
@@ -85,6 +100,7 @@ impl Component for DevicePanel {
     ) -> ComponentParts<Self> {
         let mut model = Self {
             devices: Vec::new(),
+            refreshing: false,
         };
         let widgets = view_output!();
         model.replace_devices(&widgets.device_list, init);
@@ -111,6 +127,12 @@ impl Component for DevicePanel {
                         .ok();
                 }
             }
+            DevicePanelMsg::Refresh if !self.refreshing => {
+                self.refreshing = true;
+                sender.output(DevicePanelOutput::RefreshRequested).ok();
+            }
+            DevicePanelMsg::Refresh => {}
+            DevicePanelMsg::RefreshFinished => self.refreshing = false,
         }
     }
 }

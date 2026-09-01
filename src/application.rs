@@ -53,7 +53,7 @@ impl Application {
     }
 
     pub fn replace_devices(&mut self, devices: DeviceList) {
-        self.devices = devices;
+        self.devices.replace(devices);
     }
 
     pub fn select_device(&mut self, selected_id: &str) {

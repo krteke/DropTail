@@ -89,6 +89,18 @@ impl DeviceList {
         self.selected_id = Some(selected_id.to_owned());
     }
 
+    pub fn replace(&mut self, mut refreshed: Self) {
+        if let Some(selected_id) = self.selected_id.as_deref()
+            && refreshed
+                .devices
+                .iter()
+                .any(|device| device.id == selected_id && device.is_online())
+        {
+            refreshed.selected_id = Some(selected_id.to_owned());
+        }
+        *self = refreshed;
+    }
+
     pub fn with_offline_visible(&self, show_offline: bool) -> Self {
         if show_offline {
             return self.clone();
@@ -131,6 +143,23 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(DeviceList::default().selected(), None);
+    }
+
+    #[test]
+    fn refresh_preserves_an_available_selection_and_replaces_an_unavailable_one() {
+        let first = device("first", "A", Connection::Direct);
+        let second = device("second", "B", Connection::Direct);
+        let mut list = DeviceList::new(vec![first.clone(), second.clone()]);
+        list.select(&second.id);
+
+        list.replace(DeviceList::new(vec![first.clone(), second.clone()]));
+        assert_eq!(list.selected(), Some(&second));
+
+        list.replace(DeviceList::new(vec![
+            first.clone(),
+            device("second", "B", Connection::Offline),
+        ]));
+        assert_eq!(list.selected(), Some(&first));
     }
 
     fn device(id: &str, name: &str, connection: Connection) -> Device {

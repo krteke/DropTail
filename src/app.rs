@@ -35,6 +35,7 @@ pub struct App {
 #[derive(Debug)]
 pub enum AppMsg {
     DeviceSelected(String),
+    RefreshDevices,
     AddFiles,
     AddFolder,
     FilesSelected(Vec<PathBuf>),
@@ -192,7 +193,7 @@ impl Component for App {
     view! {
         #[root]
         main_window = adw::ApplicationWindow {
-            set_title: Some("Taildrop Send"),
+            set_title: Some("DropTail"),
             set_default_width: 1080,
             set_default_height: 780,
             set_width_request: 360,
@@ -227,7 +228,7 @@ impl Component for App {
 
                     #[wrap(Some)]
                     set_title_widget = &adw::WindowTitle {
-                        set_title: "Taildrop Send",
+                        set_title: "DropTail",
                     },
 
                     pack_end = &gtk::MenuButton {
@@ -327,7 +328,7 @@ impl Component for App {
         main_menu: {
             "首选项" => PreferencesAction,
             "键盘快捷键" => ShortcutsAction,
-            "关于 Taildrop Send" => AboutAction,
+            "关于 DropTail" => AboutAction,
         }
     }
 
@@ -345,6 +346,7 @@ impl Component for App {
             sender.input_sender(),
             |output| match output {
                 DevicePanelOutput::Selected(device_id) => AppMsg::DeviceSelected(device_id),
+                DevicePanelOutput::RefreshRequested => AppMsg::RefreshDevices,
             },
         );
         let content_panel = ContentPanel::builder().launch(content.clone()).forward(
@@ -464,11 +466,7 @@ impl Component for App {
         }
         widgets.main_window.add_breakpoint(compact);
 
-        sender.spawn_oneshot_command(|| {
-            AppCommandOutput::DevicesDiscovered(
-                discover_devices().map_err(|error| error.to_string()),
-            )
-        });
+        model.device_panel.emit(DevicePanelMsg::Refresh);
 
         ComponentParts { model, widgets }
     }
@@ -477,6 +475,13 @@ impl Component for App {
         match msg {
             AppMsg::DeviceSelected(device_id) => {
                 self.state.select_device(&device_id);
+            }
+            AppMsg::RefreshDevices => {
+                sender.spawn_oneshot_command(|| {
+                    AppCommandOutput::DevicesDiscovered(
+                        discover_devices().map_err(|error| error.to_string()),
+                    )
+                });
             }
             AppMsg::AddFiles => self.choose_files(sender),
             AppMsg::AddFolder => self.choose_folder(sender),
@@ -566,9 +571,8 @@ impl Component for App {
             }
             AppMsg::ShowAbout => {
                 adw::AboutDialog::builder()
-                    .application_name("Taildrop Send")
+                    .application_name("DropTail")
                     .application_icon("send-to-symbolic")
-                    .developer_name("DropTail")
                     .version(env!("CARGO_PKG_VERSION"))
                     .comments("")
                     .license_type(gtk::License::Gpl30)
@@ -630,15 +634,18 @@ impl Component for App {
             AppCommandOutput::ContentInspected(Err(error)) => {
                 self.show_error("无法添加所选内容", &error.to_string());
             }
-            AppCommandOutput::DevicesDiscovered(Ok(devices)) => {
-                self.state.replace_devices(devices);
-                let show_offline = self.state.preferences().show_offline_devices;
-                self.device_panel.emit(DevicePanelMsg::Show(
-                    self.state.visible_devices(show_offline),
-                ));
-            }
-            AppCommandOutput::DevicesDiscovered(Err(error)) => {
-                self.show_error("无法读取 Tailscale 设备", &error);
+            AppCommandOutput::DevicesDiscovered(result) => {
+                self.device_panel.emit(DevicePanelMsg::RefreshFinished);
+                match result {
+                    Ok(devices) => {
+                        self.state.replace_devices(devices);
+                        let show_offline = self.state.preferences().show_offline_devices;
+                        self.device_panel.emit(DevicePanelMsg::Show(
+                            self.state.visible_devices(show_offline),
+                        ));
+                    }
+                    Err(error) => self.show_error("无法读取 Tailscale 设备", &error),
+                }
             }
             AppCommandOutput::Transfer(TransferEvent::Sample {
                 id,
