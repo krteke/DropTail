@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use relm4::adw::prelude::*;
+use relm4::gtk::{gdk, glib};
 use relm4::{ComponentParts, ComponentSender, SimpleComponent, adw, gtk};
 
 use crate::domain::content::{
@@ -24,6 +25,13 @@ pub enum ContentPanelOutput {
     ChangeArchiveCompression(CompressionLevel),
     ChangeArchiveOption(ArchiveOption, bool),
     RemoveItem(PathBuf),
+    MoveItem { from: usize, to: usize },
+}
+
+#[derive(Clone, glib::Boxed)]
+#[boxed_type(name = "DropTailContentItemDrag")]
+struct ContentItemDrag {
+    index: usize,
 }
 
 pub struct ContentPanel {
@@ -224,7 +232,7 @@ fn build_files_page(
         .orientation(gtk::Orientation::Vertical)
         .spacing(26)
         .build();
-    page.append(&build_file_list(selection.items(), sender.clone()));
+    page.append(&build_file_list(selection.items(), true, sender.clone()));
 
     let method_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -247,7 +255,7 @@ fn build_archive_page(
         .orientation(gtk::Orientation::Vertical)
         .spacing(20)
         .build();
-    page.append(&build_file_list(selection.items(), sender.clone()));
+    page.append(&build_file_list(selection.items(), false, sender.clone()));
 
     let settings_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -459,12 +467,16 @@ fn section_heading(title: &str) -> gtk::Box {
     heading
 }
 
-fn build_file_list(files: &[ContentItem], sender: ComponentSender<ContentPanel>) -> gtk::ListBox {
+fn build_file_list(
+    files: &[ContentItem],
+    reorderable: bool,
+    sender: ComponentSender<ContentPanel>,
+) -> gtk::ListBox {
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::None);
     list.add_css_class("boxed-list");
 
-    for file in files {
+    for (index, file) in files.iter().enumerate() {
         let detail = match file {
             ContentItem::File { .. } => "文件".to_owned(),
             ContentItem::Folder { file_count, .. } => format!("{file_count} 个文件"),
@@ -473,13 +485,66 @@ fn build_file_list(files: &[ContentItem], sender: ComponentSender<ContentPanel>)
             .title(file.name())
             .subtitle(&detail)
             .build();
+        let prefix = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(12)
+            .valign(gtk::Align::Center)
+            .build();
+
+        if reorderable && files.len() > 1 {
+            let handle_icon = gtk::gio::ThemedIcon::from_names(&[
+                "list-drag-handle-symbolic",
+                "drag-handle-symbolic",
+            ]);
+            let handle = gtk::Image::from_gicon(&handle_icon);
+            handle.set_pixel_size(20);
+            handle.set_tooltip_text(Some("拖动排序"));
+            handle.set_can_target(true);
+
+            let drag_source = gtk::DragSource::builder()
+                .actions(gdk::DragAction::MOVE)
+                .build();
+            drag_source.set_content(Some(&gdk::ContentProvider::for_value(
+                &ContentItemDrag { index }.to_value(),
+            )));
+            handle.add_controller(drag_source);
+            prefix.append(&handle);
+
+            let drop_target =
+                gtk::DropTarget::new(ContentItemDrag::static_type(), gdk::DragAction::MOVE);
+            drop_target.connect_drop({
+                let sender = sender.clone();
+                move |target, value, _x, y| {
+                    let Ok(dragged) = value.get::<ContentItemDrag>() else {
+                        return false;
+                    };
+                    let row = target
+                        .widget()
+                        .expect("a file-row drop target must be attached to its row");
+                    let destination =
+                        drop_destination(dragged.index, index, y >= f64::from(row.height()) / 2.0);
+                    if dragged.index != destination {
+                        sender
+                            .output(ContentPanelOutput::MoveItem {
+                                from: dragged.index,
+                                to: destination,
+                            })
+                            .ok();
+                    }
+                    true
+                }
+            });
+            row.add_controller(drop_target);
+        }
+
         let icon_name = match file {
             ContentItem::File { .. } => "text-x-generic-symbolic",
             ContentItem::Folder { .. } => "folder-symbolic",
         };
         let icon = gtk::Image::from_icon_name(icon_name);
         icon.set_pixel_size(20);
-        row.add_prefix(&icon);
+        prefix.append(&icon);
+        row.add_prefix(&prefix);
 
         if let Some(size_bytes) = file.size_bytes() {
             let size = gtk::Label::new(Some(&format_size(size_bytes)));
@@ -508,6 +573,11 @@ fn build_file_list(files: &[ContentItem], sender: ComponentSender<ContentPanel>)
     }
 
     list
+}
+
+fn drop_destination(source: usize, target: usize, after_target: bool) -> usize {
+    let insertion = target + usize::from(after_target);
+    insertion - usize::from(source < insertion)
 }
 
 fn check_row(
@@ -541,4 +611,19 @@ fn check_row(
     row.add_suffix(&check);
     row.set_activatable_widget(Some(&check));
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drop_destination;
+
+    #[test]
+    fn drop_destination_accounts_for_removing_the_source_row() {
+        assert_eq!(drop_destination(0, 2, true), 2);
+        assert_eq!(drop_destination(0, 2, false), 1);
+        assert_eq!(drop_destination(2, 0, false), 0);
+        assert_eq!(drop_destination(2, 0, true), 1);
+        assert_eq!(drop_destination(1, 1, false), 1);
+        assert_eq!(drop_destination(1, 1, true), 1);
+    }
 }

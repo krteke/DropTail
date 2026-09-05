@@ -50,6 +50,7 @@ pub enum AppMsg {
     ArchiveCompressionChanged(CompressionLevel),
     ArchiveOptionChanged(ArchiveOption, bool),
     RemoveContentItem(PathBuf),
+    MoveContentItem { from: usize, to: usize },
     PreferenceChanged(PreferenceChange),
     PrimaryAction,
     ShowPreferences,
@@ -384,6 +385,7 @@ impl Component for App {
                     AppMsg::ArchiveOptionChanged(option, active)
                 }
                 ContentPanelOutput::RemoveItem(item_id) => AppMsg::RemoveContentItem(item_id),
+                ContentPanelOutput::MoveItem { from, to } => AppMsg::MoveContentItem { from, to },
             },
         );
         let preferences = PreferencesDialog::builder()
@@ -536,6 +538,10 @@ impl Component for App {
             }
             AppMsg::RemoveContentItem(path) => {
                 self.state.remove_content(&path);
+                self.refresh_content_panel();
+            }
+            AppMsg::MoveContentItem { from, to } => {
+                self.state.move_content_item(from, to);
                 self.refresh_content_panel();
             }
             AppMsg::PreferenceChanged(change) => {

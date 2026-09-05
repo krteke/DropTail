@@ -95,6 +95,10 @@ impl Application {
         self.content.remove(path, defaults);
     }
 
+    pub fn move_content_item(&mut self, from: usize, to: usize) {
+        self.content.move_item(from, to);
+    }
+
     pub fn update_preference(&self, change: PreferenceChange) -> Result<(), SettingsError> {
         self.settings.write(change)
     }

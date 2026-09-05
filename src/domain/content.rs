@@ -286,6 +286,19 @@ impl ContentSelection {
         );
     }
 
+    pub fn move_item(&mut self, from: usize, to: usize) {
+        let Self::Separate(items) = self else {
+            panic!("only separately sent files can be reordered")
+        };
+        assert!(from < items.len(), "source item index must exist");
+        assert!(to < items.len(), "destination item index must exist");
+
+        if from != to {
+            let item = items.remove(from);
+            items.insert(to, item);
+        }
+    }
+
     fn from_parts(
         items: Vec<ContentItem>,
         requested_method: SendMethod,
@@ -389,5 +402,38 @@ mod tests {
         selection.set_send_method(SendMethod::Separate, defaults());
         assert_eq!(selection.send_method(), SendMethod::Separate);
         assert_eq!(selection.total_size_bytes(), Some(12));
+    }
+
+    #[test]
+    fn separately_sent_files_can_be_moved_in_both_directions() {
+        let mut selection = ContentSelection::default();
+        selection.add(
+            vec![
+                ContentItem::file(PathBuf::from("first.txt"), 1),
+                ContentItem::file(PathBuf::from("second.txt"), 2),
+                ContentItem::file(PathBuf::from("third.txt"), 3),
+            ],
+            defaults(),
+        );
+
+        selection.move_item(0, 2);
+        assert_eq!(
+            selection
+                .items()
+                .iter()
+                .map(ContentItem::name)
+                .collect::<Vec<_>>(),
+            ["second.txt", "third.txt", "first.txt"]
+        );
+
+        selection.move_item(2, 0);
+        assert_eq!(
+            selection
+                .items()
+                .iter()
+                .map(ContentItem::name)
+                .collect::<Vec<_>>(),
+            ["first.txt", "second.txt", "third.txt"]
+        );
     }
 }
