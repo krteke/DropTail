@@ -46,6 +46,7 @@ impl LocalApiClient {
     pub fn new() -> Result<Self, LocalApiError> {
         let client = Client::builder()
             .unix_socket(SOCKET_PATH)
+            .timeout(None)
             .connect_timeout(Duration::from_secs(2))
             .user_agent(concat!("droptail/", env!("CARGO_PKG_VERSION")))
             .build()?;
